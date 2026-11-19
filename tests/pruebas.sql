@@ -1,7 +1,7 @@
 -- =====================================================================
 --  LoteSmart · Pruebas de integración (sección 13 del documento)
 --  Ejecútalo en Supabase → SQL Editor DESPUÉS de lotesmart_supabase.sql.
---  Resultado esperado: "48 de 48 aprobadas".
+--  Resultado esperado: "49 de 49 aprobadas".
 --  Modifica datos: al terminar vuelve a ejecutar lotesmart_supabase.sql.
 -- =====================================================================
 drop table if exists pg_temp.r;
@@ -142,6 +142,7 @@ begin
   perform pg_temp.espera_error('Vendedor no registra lotes',
     format($q$select lote_alta(%s, 1, 'V-LOTE', fn_hoy() + 30, 10, 5, 'x')$q$, v_leche));
   perform pg_temp.espera('Vendedor no ve la auditoría', (select count(*) from v_auditoria) = 0, 'ok');
+  perform pg_temp.espera('Vendedor no ve el tablero', (select count(*) from v_tablero) = 0, 'ok');
   perform pg_temp.espera('Vendedor solo ve su propio perfil', (select count(*) from usuario) = 1, 'ok');
   perform pg_temp.espera('La venta queda firmada por la vendedora',
     (select usuario from venta order by id_venta desc limit 1) = 'Vero Vendedora', (select usuario from venta order by id_venta desc limit 1));

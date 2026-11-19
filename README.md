@@ -11,7 +11,8 @@ Inventario por lotes con caducidad y despacho FEFO. Es la versión web del docum
 | `sql/actualizacion_01_auditoria.sql` | Actualización sin borrar datos: auditoría legible (solo si instalaste antes del 19/11/2026). |
 | `sql/actualizacion_02_imagenes.sql` | Actualización sin borrar datos: fotos de productos (columna, función y bucket de Storage). |
 | `sql/actualizacion_03_roles.sql` | Actualización sin borrar datos: roles de usuario y permisos. |
-| `tests/pruebas.sql` | 48 pruebas automáticas de reglas, seguridad, roles y reportes (opcional). |
+| `sql/actualizacion_04_tablero.sql` | Actualización sin borrar datos: el tablero solo lo ve el Administrador. |
+| `tests/pruebas.sql` | 49 pruebas automáticas de reglas, seguridad, roles y reportes (opcional). |
 
 ## Instalación (5 minutos)
 
@@ -47,6 +48,7 @@ Cada cuenta tiene un rol. La primera cuenta de la instalación queda como **Admi
 
 | Permiso | Administrador | Almacén | Vendedor | Consulta |
 |---|:-:|:-:|:-:|:-:|
+| Tablero de caducidad y valor en riesgo | ✓ | | | |
 | Productos y proveedores (alta, cambios, baja) | ✓ | ✓ | | |
 | Clientes (alta, cambios, baja) | ✓ | | ✓ | |
 | Entradas de lotes, correcciones y bloqueos | ✓ | ✓ | | |
@@ -58,7 +60,7 @@ Cada cuenta tiene un rol. La primera cuenta de la instalación queda como **Admi
 | Auditoría | ✓ | | | |
 | Usuarios y permisos | ✓ | | | |
 
-Todos pueden ver el tablero, los catálogos, los lotes, las ventas y la trazabilidad. Los permisos de cada rol se cambian con casillas en la misma pantalla. La base de datos valida el permiso en cada operación, así que no se puede saltar desde fuera de la app. Un usuario desactivado ya no ve ni registra nada, y siempre debe quedar al menos un administrador activo.
+Todos pueden ver los catálogos, los lotes, las ventas y la trazabilidad. Quien no tiene el tablero entra directo a su primera pantalla (por ejemplo, el Vendedor a Ventas). Los permisos de cada rol se cambian con casillas en la misma pantalla. La base de datos valida el permiso en cada operación, así que no se puede saltar desde fuera de la app. Un usuario desactivado ya no ve ni registra nada, y siempre debe quedar al menos un administrador activo.
 
 ### Inicio de sesión
 Con Supabase Auth (correo y contraseña): iniciar sesión, crear cuenta, recuperar contraseña y cerrar sesión. La sesión se renueva sola mientras la app está abierta. Cada venta, merma y cambio queda firmado con el nombre del usuario que inició sesión; la firma la pone la base de datos a partir del token, así nadie puede firmar como otra persona.
@@ -109,4 +111,4 @@ El tablero ejecuta `marcar_caducados()` cada vez que se abre. Si quieres que cor
 
 ## Pruebas
 
-En el SQL Editor, después de instalar, ejecuta `tests/pruebas.sql`. Debe terminar con **48 de 48 aprobadas**. Al final vuelve a ejecutar el script principal para dejar los datos de prueba limpios.
+En el SQL Editor, después de instalar, ejecuta `tests/pruebas.sql`. Debe terminar con **49 de 49 aprobadas**. Al final vuelve a ejecutar el script principal para dejar los datos de prueba limpios.

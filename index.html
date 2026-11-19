@@ -1031,7 +1031,6 @@ async function verCatalogo(C, r, recargar) {
 async function paginaTablero() {
   view.innerHTML = `<div class="page-head"><div><h1>Tablero de caducidad</h1><p>Lo que está por vencer, lo que ya no se puede vender y lo que hay que volver a pedir.</p></div>
     <button class="btn" type="button" id="btnRef">${icon('restore')}Actualizar</button></div>
-    ${auth.perfil && auth.perfil.rol === 'CONSULTA' ? `<div class="notice warn">Tu rol es <b>Consulta</b>: puedes ver todo y generar reportes, pero no registrar ni modificar. Si necesitas más permisos, pídeselos a un administrador.</div>` : ''}
     <div class="kpis" id="kpis">${'<div class="card kpi"><div class="skeleton"></div></div>'.repeat(4)}</div>
     <div class="card card-pad" id="sem"></div>
     <div class="grid-2">
@@ -1042,8 +1041,7 @@ async function paginaTablero() {
   $('#btnRef').addEventListener('click', paginaTablero);
   try {
     const marca = view.firstElementChild;
-    const n = await db.rpc('marcar_caducados');
-    if (n > 0) toast(`${n} ${n === 1 ? 'lote pasó' : 'lotes pasaron'} a CADUCADO.`);
+    await revisarCaducados();
     const [[t], lotes, reorden] = await Promise.all([
       db.list('v_tablero'),
       db.list('v_lote_detalle', { where: [['cantidad_disponible', 'gt', 0]], order: 'fecha_caducidad.asc,id_lote.asc', limit: 200 }),
@@ -1908,7 +1906,7 @@ async function paginaUsuarios() {
     try {
       await db.rpc('usuario_actualizar', conUsuario({ p_id_usuario: u.id_usuario, p_nombre: d.nombre, p_id_rol: Number(d.id_rol), p_activo: d.activo }));
       toast(ok);
-      if (u.email === (auth.user && auth.user.email)) { await cargarPerfil(); pintaNav(); pintaPie(); if (!puede('usuarios.administrar')) { location.hash = '#tablero'; return; } }
+      if (u.email === (auth.user && auth.user.email)) { await cargarPerfil(); pintaNav(); pintaPie(); if (!puede('usuarios.administrar')) { location.hash = '#' + inicio()[0]; return; } }
     } catch (e) { fallo(e); }
     cargar();
   };
@@ -2046,7 +2044,7 @@ function paginaLogin(mensaje = '', modo = 'entrar') {
 async function leerRetornoAuth() {
   if (!location.hash.includes('access_token=')) return false;
   const h = new URLSearchParams(location.hash.slice(1));
-  history.replaceState(null, '', location.pathname + location.search + '#tablero');
+  history.replaceState(null, '', location.pathname + location.search);
   try {
     const user = await auth.llamar('user', undefined, h.get('access_token'));
     auth.guardar({ access_token: h.get('access_token'), refresh_token: h.get('refresh_token'), expires_in: Number(h.get('expires_in') || 3600), user });
@@ -2096,7 +2094,8 @@ async function entrarApp() {
   modoAuth(false);
   pintaPie();
   toast(`Hola, ${auth.nombre}.`);
-  if (!location.hash || location.hash === '#') location.hash = '#tablero';
+  if (auth.perfil.rol === 'CONSULTA') toast('Tu rol es Consulta: puedes ver y generar reportes, pero no registrar. Pide más permisos a un administrador.');
+  if (!location.hash || location.hash === '#') history.replaceState(null, '', '#' + inicio()[0]);
   router();
 }
 async function cerrarSesion() {
@@ -2118,7 +2117,7 @@ function pintaPie() {
 const view = $('#view');
 const RUTAS = [
   ['Operación'],
-  ['tablero', 'Tablero', 'dash', paginaTablero],
+  ['tablero', 'Tablero', 'dash', paginaTablero, 'tablero.ver'],
   ['ventas', 'Ventas', 'cart', paginaVentas],
   ['lotes', 'Lotes', 'box', paginaLotes],
   ['Catálogos'],
@@ -2133,6 +2132,14 @@ const RUTAS = [
 ];
 RUTAS.find((r) => r[0] === 'reportes').push('reportes.ver');
 const rutaVisible = (r) => r.length > 1 && (!r[4] || puede(r[4]));
+const inicio = () => RUTAS.find(rutaVisible) || RUTAS[2];   // primera pantalla permitida para el rol
+// Pasa a CADUCADO los lotes vencidos una vez por sesión (o al abrir el tablero), para cualquier rol.
+let ultimaRevision = 0;
+async function revisarCaducados(forzar = false) {
+  if (!forzar && Date.now() - ultimaRevision < 10 * 60 * 1000) return;
+  ultimaRevision = Date.now();
+  try { const n = await db.rpc('marcar_caducados'); if (n > 0) toast(`${n} ${n === 1 ? 'lote pasó' : 'lotes pasaron'} a CADUCADO.`); } catch {}
+}
 function pintaNav() {
   const html = [];
   for (let i = 0; i < RUTAS.length; i++) {
@@ -2160,9 +2167,13 @@ async function router(mensaje) {
   }
   modoAuth(false);
   pintaNav(); pintaPie();
-  const nombre = (location.hash || '#tablero').slice(1);
-  let r = RUTAS.find((x) => x[0] === nombre && x.length > 1) || RUTAS[1];
-  if (!rutaVisible(r)) { toast(`Tu rol no tiene acceso a ${r[1]}.`, true); r = RUTAS[1]; history.replaceState(null, '', '#tablero'); }
+  revisarCaducados();
+  const nombre = (location.hash || '#' + inicio()[0]).slice(1);
+  let r = RUTAS.find((x) => x[0] === nombre && x.length > 1) || inicio();
+  if (!rutaVisible(r)) {
+    if (location.hash) toast(`Tu rol no tiene acceso a ${r[1]}.`, true);
+    r = inicio(); history.replaceState(null, '', '#' + r[0]);
+  }
   $$('#nav a').forEach((a) => { if (a.dataset.ruta === r[0]) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
   document.title = r[1] + ' · LoteSmart';
   window.scrollTo(0, 0);

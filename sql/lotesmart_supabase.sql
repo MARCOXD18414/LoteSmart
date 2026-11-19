@@ -268,6 +268,7 @@ insert into rol (clave, nombre, descripcion) values
   ('CONSULTA', 'Consulta',      'Solo puede ver la información y los reportes.');
 
 insert into permiso (clave, descripcion, orden) values
+  ('tablero.ver',           'Ver el tablero de caducidad y valor en riesgo', 0),
   ('catalogo.editar',       'Dar de alta, modificar y dar de baja productos y proveedores', 1),
   ('clientes.editar',       'Dar de alta, modificar y dar de baja clientes', 2),
   ('lotes.editar',          'Registrar entradas de lotes, corregirlos y bloquearlos', 3),
@@ -661,7 +662,8 @@ select
   (select count(*) from v_producto where activo and alerta_reorden)                            as productos_reorden,
   (select coalesce(sum(total), 0) from v_venta_resumen
     where estado = 'REGISTRADA' and (fecha at time zone 'America/Mexico_City')::date = fn_hoy()) as ventas_hoy
-  from v_lote_detalle;
+  from v_lote_detalle
+having fn_tiene_permiso('tablero.ver');   -- solo quien tiene permiso ve los indicadores
 
 create view v_auditoria with (security_invoker = on) as
 select * from auditoria;
