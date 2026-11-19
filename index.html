@@ -50,6 +50,7 @@ button, input, select, textarea { font: inherit; color: inherit }
 .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap }
 .muted { color: var(--muted) }
 .nw { white-space: nowrap }
+td .mono, td.mono { white-space: nowrap }
 .label { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600 }
 
 /* ---------- Estructura ---------- */
@@ -134,6 +135,17 @@ tr.off td { color: var(--muted) }
 .s-CADUCADO { color: var(--red); background: var(--red-soft); border: 1px dashed var(--red) }
 .s-AGOTADO { color: var(--gray); background: var(--gray-soft) }
 .s-BLOQUEADO { color: var(--violet); background: var(--violet-soft) }
+.thumb { border-radius: 8px; object-fit: cover; display: inline-grid; place-items: center; background: var(--surface-2); border: 1px solid var(--line); vertical-align: middle; flex: none }
+.thumb.ph { background: var(--accent-soft); color: var(--accent-strong); font-weight: 700; font-size: .72rem; letter-spacing: .02em }
+.prod-cell { display: flex; align-items: center; gap: 10px }
+.img-field { display: flex; gap: 14px; align-items: center; flex-wrap: wrap }
+.img-prev { width: 96px; height: 96px; border-radius: 10px; border: 1px dashed var(--line); background: var(--surface-2); display: grid; place-items: center; overflow: hidden; flex: none; font-size: .8rem }
+.img-prev img { width: 100%; height: 100%; object-fit: cover }
+.img-ctl { display: flex; flex-direction: column; gap: 6px; align-items: flex-start }
+.detalle-top { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap }
+.foto-grande { width: 160px; height: 160px; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: var(--surface-2); display: grid; place-items: center; flex: none }
+.foto-grande img { width: 100%; height: 100%; object-fit: cover }
+.foto-grande .thumb { border: 0 }
 .kvs { display: flex; flex-wrap: wrap; gap: 4px 6px }
 .kv { background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; font-size: .78rem; white-space: nowrap }
 .tag { display: inline-block; font-size: .7rem; font-weight: 600; padding: 1px 7px; border-radius: 5px; background: var(--amber-soft); color: var(--amber); margin-left: 6px; vertical-align: middle }
@@ -622,6 +634,14 @@ async function fieldsHtml(fields, values = {}) {
       ctl = `<select class="input" id="${id}" name="${f.name}"${dis}><option value="">Selecciona…</option>${opts.map(([ov, ol]) => `<option value="${esc(ov)}"${String(ov) === String(v) ? ' selected' : ''}>${esc(ol)}</option>`).join('')}</select>`;
     } else if (f.type === 'textarea') {
       ctl = `<textarea class="input" id="${id}" name="${f.name}" maxlength="${f.max || 200}"${dis}>${esc(v)}</textarea>`;
+    } else if (f.type === 'image') {
+      ctl = `<div class="img-field" id="${id}">
+        <div class="img-prev">${v ? `<img src="${esc(imgUrl(v))}" alt="Foto actual">` : '<span class="muted">Sin foto</span>'}</div>
+        <div class="img-ctl">
+          <label class="btn sm">${icon('plus')}<span>${v ? 'Cambiar foto' : 'Elegir foto'}</span><input type="file" accept="image/jpeg,image/png,image/webp" data-img-input hidden></label>
+          <button type="button" class="btn sm ghost" data-img-quitar${v ? '' : ' hidden'}>Quitar foto</button>
+          <span class="img-name help">${v ? 'Foto actual' : 'JPG, PNG o WebP. Se ajusta sola a 800 px.'}</span>
+        </div></div>`;
     } else if (f.type === 'radio') {
       ctl = `<div class="radio-row">${f.options.map(([ov, ol]) => `<label><input type="radio" name="${f.name}" value="${esc(ov)}"${String(ov) === String(v) ? ' checked' : ''}><span>${esc(ol)}</span></label>`).join('')}</div>`;
     } else {
@@ -644,6 +664,7 @@ function readForm(root, fields) {
   for (const f of fields) {
     const wrap = $(`[data-field="${f.name}"]`, root);
     let raw;
+    if (f.type === 'image') { const w = $('.img-field', wrap); out[f.name] = { file: w._file || null, quitar: !!w._quitar, actual: f.actual || null }; continue; }
     if (f.type === 'radio') raw = ($(`input[name="${f.name}"]:checked`, root) || {}).value || '';
     else raw = $(`[name="${f.name}"]`, root).value.trim();
     let err = '';
@@ -692,6 +713,72 @@ async function formModal({ title, fields, values = {}, okLabel = 'Guardar', noti
 const ESTADO_TXT = { VIGENTE: 'Vigente', ROJO: 'Vence < 30 d', AMARILLO: '30–60 días', VERDE: '> 60 días', CADUCADO: 'Caducado', AGOTADO: 'Agotado', BLOQUEADO: 'Bloqueado',
   REGISTRADA: 'Registrada', CANCELADA: 'Cancelada', ACTIVO: 'Activo', BAJA: 'De baja' };
 const pill = (s, txt) => `<span class="pill s-${esc(s)}">${esc(txt || ESTADO_TXT[s] || s)}</span>`;
+/* ---------- Fotos de productos (Supabase Storage, bucket "productos") ---------- */
+const imgUrl = (path) => path ? cfg.url.replace(/\/+$/, '') + '/storage/v1/object/public/productos/' + path.split('/').map(encodeURIComponent).join('/') : '';
+const iniciales = (t) => String(t || '?').trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+const thumb = (path, nombre, size = 40) => path
+  ? `<img class="thumb" src="${esc(imgUrl(path))}" alt="${esc(nombre)}" width="${size}" height="${size}" loading="lazy" style="width:${size}px;height:${size}px" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'thumb ph',textContent:'${esc(iniciales(nombre)).replace(/'/g, '')}',style:'width:${size}px;height:${size}px'}))">`
+  : `<span class="thumb ph" style="width:${size}px;height:${size}px" aria-hidden="true">${esc(iniciales(nombre))}</span>`;
+async function reducirImagen(file, max = 800) {
+  if (!/^image\/(jpeg|png|webp)$/.test(file.type)) throw new ApiError('La foto debe ser JPG, PNG o WebP.');
+  if (file.size > 15 * 1024 * 1024) throw new ApiError('La foto pesa más de 15 MB. Elige una más ligera.');
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((ok, mal) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => mal(new ApiError('No se pudo leer la imagen.')); i.src = url; });
+    const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+    const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); ctx.drawImage(img, 0, 0, c.width, c.height);
+    let blob = await new Promise((ok) => c.toBlob(ok, 'image/webp', 0.85));
+    if (!blob || blob.type !== 'image/webp') blob = await new Promise((ok) => c.toBlob(ok, 'image/jpeg', 0.85));
+    return blob;
+  } finally { URL.revokeObjectURL(url); }
+}
+async function subirFoto(file, idProducto) {
+  const blob = await reducirImagen(file);
+  if (auth.session.expires_at - Date.now() / 1000 < 60) await auth.renovar();
+  const path = `p${idProducto}-${Date.now()}.${blob.type === 'image/webp' ? 'webp' : 'jpg'}`;
+  let res;
+  try {
+    res = await fetch(cfg.url.replace(/\/+$/, '') + '/storage/v1/object/productos/' + path, {
+      method: 'POST', body: blob,
+      headers: { apikey: cfg.key, Authorization: 'Bearer ' + auth.session.access_token, 'Content-Type': blob.type, 'x-upsert': 'true', 'cache-control': '31536000' }
+    });
+  } catch { throw new ApiError('No se pudo subir la foto. Revisa tu conexión.'); }
+  if (!res.ok) {
+    const t = await res.text();
+    if (/bucket not found/i.test(t)) throw new ApiError('Falta el espacio para fotos en Supabase. Ejecuta sql/actualizacion_02_imagenes.sql.');
+    if (/row-level security|unauthorized|403/i.test(t) || res.status === 403) throw new ApiError('Sin permiso para subir fotos. Ejecuta sql/actualizacion_02_imagenes.sql en Supabase.');
+    if (res.status === 413 || /too large|exceeded/i.test(t)) throw new ApiError('La foto es demasiado pesada (máximo 2 MB).');
+    throw new ApiError('No se pudo subir la foto (' + res.status + ').');
+  }
+  return path;
+}
+function borrarFoto(path) {
+  if (!path || !auth.session) return;
+  fetch(cfg.url.replace(/\/+$/, '') + '/storage/v1/object/productos/' + path, { method: 'DELETE', headers: { apikey: cfg.key, Authorization: 'Bearer ' + auth.session.access_token } }).catch(() => {});
+}
+// Campo de foto dentro de los formularios.
+document.addEventListener('change', (e) => {
+  const inp = e.target.closest('input[data-img-input]'); if (!inp) return;
+  const wrap = inp.closest('.img-field'), f = inp.files && inp.files[0];
+  if (!f) return;
+  if (!/^image\/(jpeg|png|webp)$/.test(f.type)) { toast('La foto debe ser JPG, PNG o WebP.', true); inp.value = ''; return; }
+  wrap._file = f; wrap._quitar = false;
+  const u = URL.createObjectURL(f);
+  $('.img-prev', wrap).innerHTML = `<img src="${u}" alt="Vista previa">`;
+  $('[data-img-quitar]', wrap).hidden = false;
+  $('.img-name', wrap).textContent = f.name;
+});
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-img-quitar]'); if (!b) return;
+  const wrap = b.closest('.img-field');
+  wrap._file = null; wrap._quitar = true;
+  $('input[data-img-input]', wrap).value = '';
+  $('.img-prev', wrap).innerHTML = `<span class="muted">Sin foto</span>`;
+  $('.img-name', wrap).textContent = 'Se quitará al guardar';
+  b.hidden = true;
+});
+
 const lotLabel = (codigo, cad) => `<span class="lot"><b>${esc(codigo)}</b><small>CAD ${cadCorta(cad)}</small></span>`;
 const dias = (n) => n == null ? '—' : (n < 0 ? `<span style="color:var(--red)">hace ${-n} d</span>` : `${n} d`);
 const emptyRow = (cols, title, sub = '') => `<tr><td colspan="${cols}"><div class="empty"><b>${esc(title)}</b>${esc(sub)}</div></td></tr>`;
@@ -719,6 +806,7 @@ const CATALOGOS = {
     buscar: ['sku', 'nombre'], placeholder: 'Consultar por SKU o nombre',
     nombre: (r) => r.nombre,
     cols: [
+      ['Foto', (r) => thumb(r.imagen_path, r.nombre, 40)],
       ['SKU', (r) => `<span class="mono">${esc(r.sku)}</span>`],
       ['Nombre', (r) => esc(r.nombre) + (r.activo && r.alerta_reorden ? '<span class="tag">Reordenar</span>' : '')],
       ['Unidad', (r) => esc(r.unidad), 'hide-sm'],
@@ -733,10 +821,25 @@ const CATALOGOS = {
       { name: 'id_unidad', label: 'Unidad de medida', type: 'select', required: true, options: opciones.unidades },
       { name: 'precio_venta', label: 'Precio de venta (MXN)', type: 'money', required: true, gt0: true, min: 0 },
       { name: 'stock_minimo', label: 'Stock mínimo', type: 'int', required: true, min: 0, value: 0, help: 'Debajo de esta cantidad se activa la alerta de reorden.' },
-      { name: 'dias_minimos_venta', label: 'Vida útil mínima para vender (días)', type: 'int', required: true, min: 0, value: 0, help: 'Un lote que vence antes de estos días ya no se vende.' }
+      { name: 'dias_minimos_venta', label: 'Vida útil mínima para vender (días)', type: 'int', required: true, min: 0, value: 0, help: 'Un lote que vence antes de estos días ya no se vende.' },
+      { name: 'imagen_path', label: 'Foto del producto (opcional)', type: 'image', full: true, actual: r.imagen_path || null }
     ],
-    guardar: (id, d) => db.rpc('producto_guardar', conUsuario({ p_id: id, p_sku: d.sku, p_nombre: d.nombre, p_id_unidad: Number(d.id_unidad),
-      p_precio_venta: d.precio_venta, p_stock_minimo: d.stock_minimo, p_dias_minimos_venta: d.dias_minimos_venta })),
+    guardar: async (id, d) => {
+      const nuevo = await db.rpc('producto_guardar', conUsuario({ p_id: id, p_sku: d.sku, p_nombre: d.nombre, p_id_unidad: Number(d.id_unidad),
+        p_precio_venta: d.precio_venta, p_stock_minimo: d.stock_minimo, p_dias_minimos_venta: d.dias_minimos_venta }));
+      const img = d.imagen_path || {};
+      try {
+        if (img.file) {
+          const path = await subirFoto(img.file, nuevo);
+          await db.rpc('producto_imagen', conUsuario({ p_id: nuevo, p_imagen_path: path }));
+          if (img.actual) borrarFoto(img.actual);
+        } else if (img.quitar && img.actual) {
+          await db.rpc('producto_imagen', conUsuario({ p_id: nuevo, p_imagen_path: null }));
+          borrarFoto(img.actual);
+        }
+      } catch (e) { toast('El producto se guardó, pero la foto no: ' + e.message, true); }
+      return nuevo;
+    },
     rpcBaja: 'producto_baja', rpcReactivar: 'producto_reactivar', rpcEliminar: 'producto_eliminar',
     bajaTxt: 'Sale del catálogo activo y ya no recibe lotes nuevos. Sus lotes vigentes se siguen vendiendo hasta agotarse.',
     hechos: (r) => [['SKU', `<span class="mono">${esc(r.sku)}</span>`], ['Unidad', esc(r.unidad)], ['Precio de venta', money(r.precio_venta)],
@@ -896,7 +999,8 @@ async function accionCatalogo(C, accion, r, recargar) {
 async function verCatalogo(C, r, recargar) {
   const ov = openModal({
     title: C.nombre(r), size: 'lg',
-    body: `<dl class="facts">${C.hechos(r).map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl><div id="rel"><div class="skeleton"></div></div>`,
+    body: `<div class="detalle-top">${C.vista === 'v_producto' ? `<div class="foto-grande">${r.imagen_path ? `<img src="${esc(imgUrl(r.imagen_path))}" alt="${esc(r.nombre)}">` : thumb(null, r.nombre, 120)}</div>` : ''}
+      <dl class="facts" style="flex:1">${C.hechos(r).map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl></div><div id="rel"><div class="skeleton"></div></div>`,
     foot: `${btn('eliminar', 'Eliminar', 'trash', 'danger')}<span class="spacer"></span>
       ${r.activo ? btn('baja', 'Dar de baja', 'archive') : btn('reactivar', 'Reactivar', 'restore')}${btn('editar', 'Editar', 'edit', 'primary')}`
   });
@@ -1183,7 +1287,7 @@ async function paginaVentas() {
   let productos = [];
   const marca = view.firstElementChild, vivo = () => marca.isConnected;
   const pintaCarrito = () => {
-    $('#cart').innerHTML = carrito.length ? carrito.map((c, i) => `<tr><td>${esc(c.nombre)}<div class="muted mono">${esc(c.sku)}</div></td><td class="num">${int(c.cantidad)}</td>
+    $('#cart').innerHTML = carrito.length ? carrito.map((c, i) => `<tr><td><div class="prod-cell">${thumb(c.imagen_path, c.nombre, 36)}<div>${esc(c.nombre)}<div class="muted mono">${esc(c.sku)}</div></div></div></td><td class="num">${int(c.cantidad)}</td>
       <td class="num">${money(c.precio)}</td><td class="num">${money(c.precio * c.cantidad)}</td>
       <td class="num"><button class="btn ghost sm" type="button" data-quitar="${i}" aria-label="Quitar ${esc(c.nombre)}">${icon('x')}</button></td></tr>`).join('')
       : emptyRow(5, 'Carrito vacío', ' Elige un producto y una cantidad.');
@@ -1207,7 +1311,7 @@ async function paginaVentas() {
     if (!(cant > 0)) return toast('La cantidad debe ser un entero mayor que 0.', true);
     const p = productos.find((x) => x.id_producto === id);
     const ex = carrito.find((c) => c.id_producto === id);
-    if (ex) ex.cantidad += cant; else carrito.push({ id_producto: id, nombre: p.nombre, sku: p.sku, precio: Number(p.precio_venta), cantidad: cant });
+    if (ex) ex.cantidad += cant; else carrito.push({ id_producto: id, nombre: p.nombre, sku: p.sku, precio: Number(p.precio_venta), cantidad: cant, imagen_path: p.imagen_path });
     $('#cant').value = 1; pintaCarrito(); resetFefo();
   });
   $('#cart').addEventListener('click', (e) => { const b = e.target.closest('[data-quitar]'); if (b) { carrito.splice(Number(b.dataset.quitar), 1); pintaCarrito(); resetFefo(); } });
@@ -1219,7 +1323,7 @@ async function paginaVentas() {
     try {
       const sim = await db.rpc('simular_fefo', { p_lineas: lineas() });
       if (!vivo()) return;
-      $('#fefo').innerHTML = `<div class="fefo">${sim.map((s) => `<div class="fefo-item"><header><span>${esc(s.producto)}</span><span>${int(s.cantidad)} pedidas</span></header>
+      $('#fefo').innerHTML = `<div class="fefo">${sim.map((s) => `<div class="fefo-item"><header><span class="prod-cell">${thumb((carrito.find((c) => c.id_producto === s.id_producto) || {}).imagen_path, s.producto, 28)}${esc(s.producto)}</span><span>${int(s.cantidad)} pedidas</span></header>
         ${s.ok ? s.asignaciones.map((a) => {
           const d = Math.round((new Date(a.fecha_caducidad + 'T12:00:00') - new Date(new Date().toDateString() + ' 12:00')) / 864e5);
           return `<div class="fefo-row">${lotLabel(a.codigo_lote, a.fecha_caducidad)}<span class="muted">caduca en ${d} d</span><span class="take">${int(a.tomar)}</span></div>`;
@@ -1432,7 +1536,7 @@ const ACCION_TXT = { ALTA: 'Alta', MODIFICACION: 'Modificación', BAJA: 'Baja', 
 const CAMPO_TXT = { estado: 'Estado', codigo_lote: 'Lote', fecha_caducidad: 'Caducidad', cantidad_inicial: 'Recibido', cantidad_disponible: 'Existencia',
   costo_unitario: 'Costo', motivo_bloqueo: 'Motivo de bloqueo', id_producto: 'Producto #', id_proveedor: 'Proveedor #', sku: 'SKU', nombre: 'Nombre',
   precio_venta: 'Precio', stock_minimo: 'Stock mínimo', dias_minimos_venta: 'Vida mínima (días)', activo: 'Activo', rfc: 'RFC', telefono: 'Teléfono',
-  correo: 'Correo', id_cliente: 'Cliente #', id_unidad: 'Unidad #', motivo_cancelacion: 'Motivo', fecha_cancelacion: 'Cancelada el' };
+  correo: 'Correo', imagen_path: 'Foto', id_cliente: 'Cliente #', id_unidad: 'Unidad #', motivo_cancelacion: 'Motivo', fecha_cancelacion: 'Cancelada el' };
 const OMITIR = new Set(['id_lote', 'id_venta', 'creado_en', 'fecha_entrada', 'fecha', 'usuario']);
 const fnFolio = (id) => 'V-' + String(id).padStart(6, '0');
 function valorBonito(k, v) {

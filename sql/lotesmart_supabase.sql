@@ -30,7 +30,7 @@ drop function if exists
   trg_lote_bi, trg_lote_bu, trg_lote_bd, trg_mov_bi, trg_mov_ai, trg_mov_inmutable,
   trg_venta_bu, trg_venta_bd, trg_catalogo_bi, trg_producto_bd, trg_proveedor_bd, trg_cliente_bd,
   trg_auditar, fn_fefo_asignar,
-  producto_guardar, producto_baja, producto_reactivar, producto_eliminar,
+  producto_guardar, producto_baja, producto_reactivar, producto_eliminar, producto_imagen,
   proveedor_guardar, proveedor_baja, proveedor_reactivar, proveedor_eliminar,
   cliente_guardar, cliente_baja, cliente_reactivar, cliente_eliminar,
   unidad_guardar,
@@ -133,6 +133,7 @@ create table producto (
   precio_venta       numeric(10,2) not null,
   stock_minimo       int           not null default 0,
   dias_minimos_venta int           not null default 0,
+  imagen_path        varchar(200),            -- ruta de la foto en Supabase Storage (bucket "productos")
   activo             boolean       not null default true,
   creado_en          timestamptz   not null default now(),
   constraint uq_producto_sku unique (sku),
@@ -476,7 +477,8 @@ select p.id_producto, p.sku, p.nombre, p.id_unidad, u.clave as unidad, p.precio_
        coalesce(s.stock_vigente, 0)  as stock_vigente,
        coalesce(s.stock_vendible, 0) as stock_vendible,
        coalesce(s.lotes, 0)          as lotes,
-       (coalesce(s.stock_vigente, 0) < p.stock_minimo) as alerta_reorden
+       (coalesce(s.stock_vigente, 0) < p.stock_minimo) as alerta_reorden,
+       p.imagen_path
   from producto p
   join unidad_medida u on u.id_unidad = p.id_unidad
   left join lateral (
@@ -581,6 +583,18 @@ begin
     if v_id is null then raise exception 'El producto no existe.' using errcode = 'P0001'; end if;
   end if;
   return v_id;
+end $$;
+
+-- Asigna o quita (null) la foto del producto. El archivo se sube a Storage desde la app.
+create function producto_imagen(p_id int, p_imagen_path text, p_usuario text default null) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  perform fn_set_usuario(p_usuario);
+  if p_imagen_path is not null and p_imagen_path !~ '^[A-Za-z0-9._/-]{3,200}$' then
+    raise exception 'Nombre de archivo de imagen no válido.' using errcode = 'P0001';
+  end if;
+  update producto set imagen_path = p_imagen_path where id_producto = p_id;
+  if not found then raise exception 'El producto no existe.' using errcode = 'P0001'; end if;
 end $$;
 
 create function producto_baja(p_id int, p_usuario text default null) returns void
@@ -1051,7 +1065,7 @@ begin
     'fn_hoy()', 'fn_usuario()', 'fn_estado_lote(estado_lote, int, date)', 'fn_folio(bigint)',
     'unidad_guardar(text, text, text)',
     'producto_guardar(int, text, text, int, numeric, int, int, text)',
-    'producto_baja(int, text)', 'producto_reactivar(int, text)', 'producto_eliminar(int, text)',
+    'producto_baja(int, text)', 'producto_reactivar(int, text)', 'producto_eliminar(int, text)', 'producto_imagen(int, text, text)',
     'proveedor_guardar(int, text, text, text, text)',
     'proveedor_baja(int, text)', 'proveedor_reactivar(int, text)', 'proveedor_eliminar(int, text)',
     'cliente_guardar(int, text, text, text, text, text)',
@@ -1069,6 +1083,31 @@ begin
     execute format('revoke execute on function %s from public, anon', f);
     execute format('grant execute on function %s to authenticated', f);
   end loop;
+end $$;
+
+-- =====================================================================
+-- Fotos de productos: bucket público "productos" en Supabase Storage.
+-- Cualquiera puede VER las fotos (para mostrarlas en la app); solo
+-- usuarios con sesión pueden subir, reemplazar o borrar. Máx. 2 MB, solo imágenes.
+-- =====================================================================
+do $$
+begin
+  if to_regclass('storage.buckets') is null then
+    raise notice 'Storage no disponible (fuera de Supabase): se omite el bucket de fotos.';
+    return;
+  end if;
+  insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+  values ('productos', 'productos', true, 2097152, array['image/jpeg','image/png','image/webp'])
+  on conflict (id) do update set public = true, file_size_limit = 2097152,
+                                 allowed_mime_types = array['image/jpeg','image/png','image/webp'];
+  execute 'drop policy if exists "lotesmart fotos leer" on storage.objects';
+  execute 'drop policy if exists "lotesmart fotos subir" on storage.objects';
+  execute 'drop policy if exists "lotesmart fotos cambiar" on storage.objects';
+  execute 'drop policy if exists "lotesmart fotos borrar" on storage.objects';
+  execute $p$create policy "lotesmart fotos leer" on storage.objects for select using (bucket_id = 'productos')$p$;
+  execute $p$create policy "lotesmart fotos subir" on storage.objects for insert to authenticated with check (bucket_id = 'productos')$p$;
+  execute $p$create policy "lotesmart fotos cambiar" on storage.objects for update to authenticated using (bucket_id = 'productos') with check (bucket_id = 'productos')$p$;
+  execute $p$create policy "lotesmart fotos borrar" on storage.objects for delete to authenticated using (bucket_id = 'productos')$p$;
 end $$;
 
 -- =====================================================================

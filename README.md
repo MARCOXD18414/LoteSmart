@@ -9,6 +9,7 @@ Inventario por lotes con caducidad y despacho FEFO. Es la versión web del docum
 | `index.html` | La aplicación completa. Un solo archivo, sin instalar nada. |
 | `sql/lotesmart_supabase.sql` | Base de datos: tablas, reglas, vistas, funciones, seguridad y datos de prueba. |
 | `sql/actualizacion_01_auditoria.sql` | Actualización sin borrar datos: auditoría legible (solo si instalaste antes del 19/11/2026). |
+| `sql/actualizacion_02_imagenes.sql` | Actualización sin borrar datos: fotos de productos (columna, función y bucket de Storage). |
 | `tests/pruebas.sql` | 34 pruebas automáticas de reglas, seguridad y reportes (opcional). |
 
 ## Instalación (5 minutos)
@@ -36,6 +37,9 @@ Para publicarla en internet súbela a Netlify Drop, Vercel o GitHub Pages. Si qu
 | Ventas | Carrito con "Simular FEFO" | Cancelar con motivo (devuelve a cada lote) | No se editan (regla del documento) | Folio, cliente, rango de fechas, estado |
 
 Además: tablero de caducidad (valor en riesgo, no vendible, semáforo, alerta de reorden), mermas y ajustes con motivo, trazabilidad por lote y auditoría.
+
+### Fotos de productos
+Cada producto puede llevar una foto (JPG, PNG o WebP). La app la reduce sola a 800 px antes de subirla a Supabase Storage (bucket público `productos`, máximo 2 MB). Se ve en el catálogo, en el detalle del producto y en el carrito de ventas. Solo usuarios con sesión pueden subir o quitar fotos.
 
 ### Inicio de sesión
 Con Supabase Auth (correo y contraseña): iniciar sesión, crear cuenta, recuperar contraseña y cerrar sesión. La sesión se renueva sola mientras la app está abierta. Cada venta, merma y cambio queda firmado con el nombre del usuario que inició sesión; la firma la pone la base de datos a partir del token, así nadie puede firmar como otra persona.
