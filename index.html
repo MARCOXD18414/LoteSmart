@@ -49,6 +49,7 @@ button, input, select, textarea { font: inherit; color: inherit }
 .mono { font-family: var(--f-mono); font-size: .86em; letter-spacing: .01em }
 .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap }
 .muted { color: var(--muted) }
+.nw { white-space: nowrap }
 .label { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600 }
 
 /* ---------- Estructura ---------- */
@@ -1304,51 +1305,125 @@ async function verVenta(v, recargar) {
    TRAZABILIDAD
    ===================================================================== */
 async function paginaTrazabilidad() {
-  view.innerHTML = `<div class="page-head"><div><h1>Trazabilidad</h1><p>Ante un retiro sanitario: elige el lote y ve exactamente a qué clientes llegó, con su teléfono para avisarles.</p></div></div>
-    <div class="card card-pad"><div class="toolbar">
-      <label class="search" style="max-width:none">${icon('search')}<input class="input" id="q" list="lotesList" placeholder="Escribe o elige el código de lote" aria-label="Código de lote"></label>
-      <datalist id="lotesList"></datalist><button class="btn primary" type="button" id="btnBuscar">Consultar lote</button></div></div>
+  const st = store.get('filtro.traz', { modo: 'lote' });
+  view.innerHTML = `<div class="page-head"><div><h1>Trazabilidad</h1><p>Ante un retiro sanitario: elige el lote y ve exactamente a qué clientes llegó, con su teléfono para avisarles. También puedes ver qué lotes recibió un cliente.</p></div></div>
+    <div class="card card-pad" style="display:flex;flex-direction:column;gap:12px">
+      <div class="seg" role="group" aria-label="Buscar por" style="align-self:flex-start">
+        <button type="button" data-modo="lote" aria-pressed="${st.modo === 'lote'}">Por lote</button>
+        <button type="button" data-modo="cliente" aria-pressed="${st.modo === 'cliente'}">Por cliente</button>
+      </div>
+      <div class="toolbar" id="barLote"${st.modo === 'lote' ? '' : ' hidden'}>
+        <label class="search" style="max-width:none">${icon('search')}<input class="input" id="q" list="lotesList" placeholder="Código de lote, producto o SKU (ej. LG-2410-A o leche)" aria-label="Lote a rastrear" autocomplete="off"></label>
+        <datalist id="lotesList"></datalist><button class="btn primary" type="button" id="btnBuscar">Consultar</button>
+      </div>
+      <div class="toolbar" id="barCliente"${st.modo === 'cliente' ? '' : ' hidden'}>
+        <select class="input" id="selCli" style="max-width:420px" aria-label="Cliente"><option value="">Cargando clientes…</option></select>
+      </div>
+    </div>
     <div id="res"></div>`;
-  let lotes = [];
   const res0 = $('#res');
-  try { lotes = await db.list('v_lote_detalle', { select: 'id_lote,codigo_lote,producto,fecha_caducidad', order: 'codigo_lote.asc' }); }
-  catch (e) { return fallo(e); }
+  let lotes = [], seq = 0;
+  try {
+    lotes = await db.list('v_lote_detalle', { select: 'id_lote,codigo_lote,producto,sku,proveedor,fecha_caducidad,cantidad_disponible,cantidad_inicial,unidad,semaforo', order: 'codigo_lote.asc' });
+  } catch (e) { return fallo(e); }
   if (!res0.isConnected) return;
   $('#lotesList').innerHTML = lotes.map((l) => `<option value="${esc(l.codigo_lote)}">${esc(l.producto)}</option>`).join('');
-  const buscar = async () => {
-    const t = $('#q').value.trim().toUpperCase();
-    const hits = lotes.filter((l) => l.codigo_lote.includes(t));
-    if (!t || !hits.length) { $('#res').innerHTML = `<div class="card"><div class="empty"><b>${t ? 'No hay lotes con ese código' : 'Escribe un código de lote'}</b>Prueba con parte del código, por ejemplo LG-2410.</div></div>`; return; }
-    const l = hits.find((h) => h.codigo_lote === t) || hits[0];
+
+  // Muestra a qué clientes llegó un lote.
+  const mostrarLote = async (l) => {
+    const mio = ++seq;
     $('#q').value = l.codigo_lote;
-    $('#res').innerHTML = '<div class="card loading"><div class="skeleton"></div></div>';
+    res0.innerHTML = '<div class="card loading"><div class="skeleton"></div></div>';
     try {
       const [traz, movs] = await Promise.all([
         db.list('v_trazabilidad', { where: [['id_lote', 'eq', l.id_lote]], order: 'fecha.desc' }),
         db.list('v_movimiento_detalle', { where: [['id_lote', 'eq', l.id_lote]], order: 'fecha.desc,id_movimiento.desc' })
       ]);
-      if (!res0.isConnected) return;
+      if (!res0.isConnected || mio !== seq) return;
       const activos = traz.filter((x) => x.estado === 'REGISTRADA');
       const clientes = new Set(activos.map((x) => x.cliente)).size;
-      $('#res').innerHTML = `<div class="grid-2">
-        <div class="card"><div class="card-head"><div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">${lotLabel(l.codigo_lote, l.fecha_caducidad)}<span>${esc(l.producto)}</span></div>
-          <span class="muted">${clientes} ${clientes === 1 ? 'cliente' : 'clientes'} · ${int(activos.reduce((a, x) => a + x.cantidad, 0))} unidades</span></div>
+      const unidades = activos.reduce((a, x) => a + Number(x.cantidad), 0);
+      res0.innerHTML = `<div class="grid-2">
+        <div class="card"><div class="card-head"><div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">${lotLabel(l.codigo_lote, l.fecha_caducidad)}<span>${esc(l.producto)}</span>${pill(l.semaforo)}</div>
+          <span class="muted">${pl(clientes, 'cliente', 'clientes')} · ${pl(unidades, 'unidad vendida', 'unidades vendidas')}</span></div>
           <div class="table-wrap"><table><thead><tr><th>Cliente</th><th>Teléfono</th><th>Folio</th><th>Fecha</th><th class="num">Cantidad</th><th>Venta</th></tr></thead><tbody>
-          ${traz.length ? traz.map((x) => `<tr class="${x.estado === 'CANCELADA' ? 'off' : ''}"><td><b>${esc(x.cliente)}</b></td><td class="mono">${esc(x.telefono || '—')}</td><td class="mono">${esc(x.folio)}</td>
-            <td>${fecha(x.fecha)}</td><td class="num">${int(x.cantidad)}</td><td>${pill(x.estado)}</td></tr>`).join('') : emptyRow(6, 'Este lote no ha llegado a ningún cliente', '')}</tbody></table></div></div>
+          ${traz.length ? traz.map((x) => `<tr class="${x.estado === 'CANCELADA' ? 'off' : ''}"><td><b>${esc(x.cliente)}</b></td><td class="mono nw">${esc(x.telefono || '—')}</td><td class="mono nw">${esc(x.folio)}</td>
+            <td class="nw">${fecha(x.fecha)}</td><td class="num">${int(x.cantidad)}</td><td>${pill(x.estado)}</td></tr>`).join('')
+            : emptyRow(6, 'Este lote todavía no se ha vendido', ' Ningún cliente lo ha recibido. Existencia: ' + int(l.cantidad_disponible) + ' de ' + int(l.cantidad_inicial) + '.')}</tbody></table></div>
+          ${traz.some((x) => x.estado === 'CANCELADA') ? '<p class="muted" style="margin:0;padding:10px 16px;font-size:.82rem;border-top:1px solid var(--line)">Las ventas canceladas aparecen en gris: esas unidades regresaron a bodega.</p>' : ''}</div>
         <div class="card"><div class="card-head"><h2>Movimientos del lote</h2><button class="btn sm" type="button" id="verL">Abrir lote</button></div>
-          <div class="table-wrap"><table><tbody>${movs.length ? movs.map((m) => `<tr><td>${fecha(m.fecha)}</td><td>${TIPO_TXT[m.tipo]}</td><td class="num">${signo(m.tipo)}${int(m.cantidad)}</td></tr>`).join('') : emptyRow(3, 'Sin movimientos', '')}</tbody></table></div></div></div>`;
-      $('#verL').addEventListener('click', () => verLote(l.id_lote, buscar));
-    } catch (e) { fallo(e); }
+          <div class="table-wrap"><table><tbody>
+            <tr><td>Entrada</td><td>${esc(l.proveedor)}</td><td class="num">+${int(l.cantidad_inicial)}</td></tr>
+            ${movs.map((m) => `<tr><td>${fecha(m.fecha)}</td><td>${TIPO_TXT[m.tipo]}${m.folio ? ` <span class="muted mono">${esc(m.folio)}</span>` : ''}</td><td class="num">${signo(m.tipo)}${int(m.cantidad)}</td></tr>`).join('')}
+            <tr><td colspan="2"><b>Existencia actual</b></td><td class="num"><b>${int(l.cantidad_disponible)}</b></td></tr>
+          </tbody></table></div></div></div>`;
+      $('#verL').addEventListener('click', () => verLote(l.id_lote, () => paginaTrazabilidad()));
+    } catch (e) { if (mio === seq) res0.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
   };
+
+  // Busca por código, producto o SKU; si hay varios, deja elegir.
+  const buscar = () => {
+    const t = $('#q').value.trim().toUpperCase();
+    if (!t) { res0.innerHTML = `<div class="card"><div class="empty"><b>Escribe un código de lote o un producto</b>Por ejemplo LG-2410-A o leche.</div></div>`; return; }
+    const exacto = lotes.find((l) => l.codigo_lote === t);
+    if (exacto) return mostrarLote(exacto);
+    const hits = lotes.filter((l) => l.codigo_lote.includes(t) || l.producto.toUpperCase().includes(t) || l.sku.toUpperCase().includes(t));
+    if (!hits.length) { res0.innerHTML = `<div class="card"><div class="empty"><b>No encontramos lotes con “${esc($('#q').value.trim())}”</b>Prueba con parte del código (LG-2410) o con el nombre del producto.</div></div>`; return; }
+    if (hits.length === 1) return mostrarLote(hits[0]);
+    ++seq;
+    res0.innerHTML = `<div class="card"><div class="card-head"><h2>${hits.length} lotes coinciden</h2><span class="muted">Elige el lote a rastrear</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Lote</th><th>Producto</th><th class="hide-sm">Proveedor</th><th class="num">Existencia</th><th>Estado</th><th></th></tr></thead><tbody>
+      ${hits.map((l) => `<tr class="click" data-id="${l.id_lote}"><td>${lotLabel(l.codigo_lote, l.fecha_caducidad)}</td><td>${esc(l.producto)}</td><td class="hide-sm">${esc(l.proveedor)}</td>
+        <td class="num">${int(l.cantidad_disponible)} / ${int(l.cantidad_inicial)}</td><td>${pill(l.semaforo)}</td><td class="num"><button class="btn sm" type="button">Ver clientes</button></td></tr>`).join('')}</tbody></table></div></div>`;
+    $$('tr[data-id]', res0).forEach((tr) => tr.addEventListener('click', () => mostrarLote(lotes.find((l) => String(l.id_lote) === tr.dataset.id))));
+  };
+
+  // Qué lotes recibió un cliente.
+  const porCliente = async (id) => {
+    const mio = ++seq;
+    if (!id) { res0.innerHTML = `<div class="card"><div class="empty"><b>Elige un cliente</b>Verás cada lote que se le vendió, con su caducidad.</div></div>`; return; }
+    res0.innerHTML = '<div class="card loading"><div class="skeleton"></div></div>';
+    try {
+      const rows = await db.list('v_trazabilidad', { where: [['id_cliente', 'eq', id]], order: 'fecha.desc' });
+      if (!res0.isConnected || mio !== seq) return;
+      const vivos = rows.filter((r) => r.estado === 'REGISTRADA');
+      res0.innerHTML = `<div class="card"><div class="card-head"><h2>Lotes que recibió ${esc($('#selCli').selectedOptions[0].textContent)}</h2>
+        <span class="muted">${pl(new Set(vivos.map((r) => r.id_lote)).size, 'lote', 'lotes')} · ${pl(vivos.reduce((a, r) => a + Number(r.cantidad), 0), 'unidad', 'unidades')}</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Lote</th><th>Producto</th><th>Folio</th><th>Fecha</th><th class="num">Cantidad</th><th>Venta</th></tr></thead><tbody>
+        ${rows.length ? rows.map((r) => { const l = lotes.find((x) => x.id_lote === r.id_lote) || {};
+          return `<tr class="click${r.estado === 'CANCELADA' ? ' off' : ''}" data-id="${r.id_lote}"><td>${lotLabel(r.codigo_lote, l.fecha_caducidad || '')}</td><td>${esc(r.producto)}</td>
+          <td class="mono nw">${esc(r.folio)}</td><td class="nw">${fecha(r.fecha)}</td><td class="num">${int(r.cantidad)}</td><td>${pill(r.estado)}</td></tr>`; }).join('')
+          : emptyRow(6, 'Este cliente todavía no tiene compras', '')}</tbody></table></div></div>`;
+      $$('tr[data-id]', res0).forEach((tr) => tr.addEventListener('click', () => { st.modo = 'lote'; store.set('filtro.traz', st); cambiaModo(); mostrarLote(lotes.find((l) => String(l.id_lote) === tr.dataset.id)); }));
+    } catch (e) { if (mio === seq) res0.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
+  };
+
+  const cambiaModo = () => {
+    $$('[data-modo]').forEach((x) => x.setAttribute('aria-pressed', x.dataset.modo === st.modo));
+    $('#barLote').hidden = st.modo !== 'lote'; $('#barCliente').hidden = st.modo !== 'cliente';
+  };
+  $$('[data-modo]').forEach((b) => b.addEventListener('click', () => {
+    st.modo = b.dataset.modo; store.set('filtro.traz', st); cambiaModo();
+    if (st.modo === 'cliente') porCliente($('#selCli').value); else buscar();
+  }));
   $('#btnBuscar').addEventListener('click', buscar);
-  $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') buscar(); });
-  $('#q').addEventListener('change', buscar);
+  $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); buscar(); } });
+  $('#q').addEventListener('input', () => { const v = $('#q').value.trim().toUpperCase(); const l = lotes.find((x) => x.codigo_lote === v); if (l) mostrarLote(l); });
+  $('#selCli').addEventListener('change', (e) => porCliente(e.target.value));
+
+  try {
+    const cl = await db.list('cliente', { select: 'id_cliente,nombre', order: 'nombre.asc' });
+    if (!res0.isConnected) return;
+    $('#selCli').innerHTML = '<option value="">Elige un cliente…</option>' + cl.map((c) => `<option value="${c.id_cliente}">${esc(c.nombre)}</option>`).join('');
+  } catch {}
+  if (st.modo === 'cliente') return porCliente('');
   // Abre con un lote que ya tiene ventas, para que se vea el ejemplo.
   try {
-    const [primero] = await db.list('v_trazabilidad', { select: 'codigo_lote', order: 'fecha.asc', limit: 1 });
-    if (primero) { $('#q').value = primero.codigo_lote; buscar(); }
-  } catch {}
+    const [primero] = await db.list('v_trazabilidad', { select: 'id_lote', where: [['estado', 'eq', 'REGISTRADA']], order: 'fecha.desc', limit: 1 });
+    if (!res0.isConnected) return;
+    const l = primero && lotes.find((x) => x.id_lote === primero.id_lote);
+    if (l) mostrarLote(l); else buscar();
+  } catch { buscar(); }
 }
 
 /* =====================================================================
