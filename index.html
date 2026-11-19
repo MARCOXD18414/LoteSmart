@@ -1306,18 +1306,18 @@ async function verVenta(v, recargar) {
    ===================================================================== */
 async function paginaTrazabilidad() {
   const st = store.get('filtro.traz', { modo: 'lote' });
-  view.innerHTML = `<div class="page-head"><div><h1>Trazabilidad</h1><p>Ante un retiro sanitario: elige el lote y ve exactamente a qué clientes llegó, con su teléfono para avisarles. También puedes ver qué lotes recibió un cliente.</p></div></div>
+  view.innerHTML = `<div class="page-head"><div><h1>Trazabilidad</h1><p>Ante un retiro sanitario: elige el producto y el lote, y ve exactamente a qué clientes llegó, con su teléfono para avisarles. También puedes ver qué lotes recibió un cliente.</p></div></div>
     <div class="card card-pad" style="display:flex;flex-direction:column;gap:12px">
       <div class="seg" role="group" aria-label="Buscar por" style="align-self:flex-start">
         <button type="button" data-modo="lote" aria-pressed="${st.modo === 'lote'}">Por lote</button>
         <button type="button" data-modo="cliente" aria-pressed="${st.modo === 'cliente'}">Por cliente</button>
       </div>
       <div class="toolbar" id="barLote"${st.modo === 'lote' ? '' : ' hidden'}>
-        <label class="search" style="max-width:none">${icon('search')}<input class="input" id="q" list="lotesList" placeholder="Código de lote, producto o SKU (ej. LG-2410-A o leche)" aria-label="Lote a rastrear" autocomplete="off"></label>
-        <datalist id="lotesList"></datalist><button class="btn primary" type="button" id="btnBuscar">Consultar</button>
+        <div class="field" style="flex:1 1 260px;max-width:380px"><label for="selProdT">Producto</label><select class="input" id="selProdT"><option value="">Cargando…</option></select></div>
+        <div class="field" style="flex:1 1 300px;max-width:440px"><label for="selLote">Lote</label><select class="input" id="selLote" disabled><option value="">Primero elige un producto</option></select></div>
       </div>
       <div class="toolbar" id="barCliente"${st.modo === 'cliente' ? '' : ' hidden'}>
-        <select class="input" id="selCli" style="max-width:420px" aria-label="Cliente"><option value="">Cargando clientes…</option></select>
+        <div class="field" style="flex:1 1 300px;max-width:440px"><label for="selCli">Cliente</label><select class="input" id="selCli"><option value="">Cargando clientes…</option></select></div>
       </div>
     </div>
     <div id="res"></div>`;
@@ -1327,12 +1327,22 @@ async function paginaTrazabilidad() {
     lotes = await db.list('v_lote_detalle', { select: 'id_lote,codigo_lote,producto,sku,proveedor,fecha_caducidad,cantidad_disponible,cantidad_inicial,unidad,semaforo', order: 'codigo_lote.asc' });
   } catch (e) { return fallo(e); }
   if (!res0.isConnected) return;
-  $('#lotesList').innerHTML = lotes.map((l) => `<option value="${esc(l.codigo_lote)}">${esc(l.producto)}</option>`).join('');
+  // Catálogo: producto → lote (el usuario solo elige, no escribe).
+  const productosT = [...new Map(lotes.map((l) => [l.sku, l.producto])).entries()].sort((a, b) => a[1].localeCompare(b[1], 'es'));
+  $('#selProdT').innerHTML = '<option value="">Elige un producto…</option>' + productosT.map(([sku, nom]) => `<option value="${esc(sku)}">${esc(nom)} · ${esc(sku)}</option>`).join('');
+  const llenaLotes = (sku, idSel) => {
+    const ls = lotes.filter((l) => l.sku === sku).sort((a, b) => a.fecha_caducidad.localeCompare(b.fecha_caducidad));
+    $('#selLote').disabled = !sku;
+    $('#selLote').innerHTML = !sku ? '<option value="">Primero elige un producto</option>'
+      : '<option value="">Elige un lote…</option>' + ls.map((l) => `<option value="${l.id_lote}"${l.id_lote === idSel ? ' selected' : ''}>${esc(l.codigo_lote)} · caduca ${cadCorta(l.fecha_caducidad)} · ${esc(ESTADO_TXT[l.semaforo] || l.semaforo)}</option>`).join('');
+    return ls;
+  };
 
   // Muestra a qué clientes llegó un lote.
   const mostrarLote = async (l) => {
     const mio = ++seq;
-    $('#q').value = l.codigo_lote;
+    if ($('#selProdT').value !== l.sku) $('#selProdT').value = l.sku;
+    llenaLotes(l.sku, l.id_lote);
     res0.innerHTML = '<div class="card loading"><div class="skeleton"></div></div>';
     try {
       const [traz, movs] = await Promise.all([
@@ -1361,22 +1371,7 @@ async function paginaTrazabilidad() {
     } catch (e) { if (mio === seq) res0.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
   };
 
-  // Busca por código, producto o SKU; si hay varios, deja elegir.
-  const buscar = () => {
-    const t = $('#q').value.trim().toUpperCase();
-    if (!t) { res0.innerHTML = `<div class="card"><div class="empty"><b>Escribe un código de lote o un producto</b>Por ejemplo LG-2410-A o leche.</div></div>`; return; }
-    const exacto = lotes.find((l) => l.codigo_lote === t);
-    if (exacto) return mostrarLote(exacto);
-    const hits = lotes.filter((l) => l.codigo_lote.includes(t) || l.producto.toUpperCase().includes(t) || l.sku.toUpperCase().includes(t));
-    if (!hits.length) { res0.innerHTML = `<div class="card"><div class="empty"><b>No encontramos lotes con “${esc($('#q').value.trim())}”</b>Prueba con parte del código (LG-2410) o con el nombre del producto.</div></div>`; return; }
-    if (hits.length === 1) return mostrarLote(hits[0]);
-    ++seq;
-    res0.innerHTML = `<div class="card"><div class="card-head"><h2>${hits.length} lotes coinciden</h2><span class="muted">Elige el lote a rastrear</span></div>
-      <div class="table-wrap"><table><thead><tr><th>Lote</th><th>Producto</th><th class="hide-sm">Proveedor</th><th class="num">Existencia</th><th>Estado</th><th></th></tr></thead><tbody>
-      ${hits.map((l) => `<tr class="click" data-id="${l.id_lote}"><td>${lotLabel(l.codigo_lote, l.fecha_caducidad)}</td><td>${esc(l.producto)}</td><td class="hide-sm">${esc(l.proveedor)}</td>
-        <td class="num">${int(l.cantidad_disponible)} / ${int(l.cantidad_inicial)}</td><td>${pill(l.semaforo)}</td><td class="num"><button class="btn sm" type="button">Ver clientes</button></td></tr>`).join('')}</tbody></table></div></div>`;
-    $$('tr[data-id]', res0).forEach((tr) => tr.addEventListener('click', () => mostrarLote(lotes.find((l) => String(l.id_lote) === tr.dataset.id))));
-  };
+  const vacio = () => { ++seq; res0.innerHTML = `<div class="card"><div class="empty"><b>Elige un producto y luego el lote</b>Verás a qué clientes llegó ese lote y todos sus movimientos.</div></div>`; };
 
   // Qué lotes recibió un cliente.
   const porCliente = async (id) => {
@@ -1404,11 +1399,14 @@ async function paginaTrazabilidad() {
   };
   $$('[data-modo]').forEach((b) => b.addEventListener('click', () => {
     st.modo = b.dataset.modo; store.set('filtro.traz', st); cambiaModo();
-    if (st.modo === 'cliente') porCliente($('#selCli').value); else buscar();
+    if (st.modo === 'cliente') porCliente($('#selCli').value);
+    else { const l = lotes.find((x) => String(x.id_lote) === $('#selLote').value); l ? mostrarLote(l) : vacio(); }
   }));
-  $('#btnBuscar').addEventListener('click', buscar);
-  $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); buscar(); } });
-  $('#q').addEventListener('input', () => { const v = $('#q').value.trim().toUpperCase(); const l = lotes.find((x) => x.codigo_lote === v); if (l) mostrarLote(l); });
+  $('#selProdT').addEventListener('change', (e) => {
+    const ls = llenaLotes(e.target.value);
+    if (ls.length === 1) mostrarLote(ls[0]); else vacio();
+  });
+  $('#selLote').addEventListener('change', (e) => { const l = lotes.find((x) => String(x.id_lote) === e.target.value); l ? mostrarLote(l) : vacio(); });
   $('#selCli').addEventListener('change', (e) => porCliente(e.target.value));
 
   try {
@@ -1422,8 +1420,8 @@ async function paginaTrazabilidad() {
     const [primero] = await db.list('v_trazabilidad', { select: 'id_lote', where: [['estado', 'eq', 'REGISTRADA']], order: 'fecha.desc', limit: 1 });
     if (!res0.isConnected) return;
     const l = primero && lotes.find((x) => x.id_lote === primero.id_lote);
-    if (l) mostrarLote(l); else buscar();
-  } catch { buscar(); }
+    if (l) mostrarLote(l); else vacio();
+  } catch { vacio(); }
 }
 
 /* =====================================================================
