@@ -37,6 +37,7 @@
   --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.25); color-scheme: dark }
 
 * { box-sizing: border-box }
+[hidden] { display: none !important }
 html, body { height: 100% }
 body { background: var(--bg); color: var(--ink); font: 14px/1.5 var(--f-body); margin: 0 }
 h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; line-height: 1.2 }
@@ -132,6 +133,8 @@ tr.off td { color: var(--muted) }
 .s-CADUCADO { color: var(--red); background: var(--red-soft); border: 1px dashed var(--red) }
 .s-AGOTADO { color: var(--gray); background: var(--gray-soft) }
 .s-BLOQUEADO { color: var(--violet); background: var(--violet-soft) }
+.kvs { display: flex; flex-wrap: wrap; gap: 4px 6px }
+.kv { background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; font-size: .78rem; white-space: nowrap }
 .tag { display: inline-block; font-size: .7rem; font-weight: 600; padding: 1px 7px; border-radius: 5px; background: var(--amber-soft); color: var(--amber); margin-left: 6px; vertical-align: middle }
 
 /* Etiqueta de lote: como la etiqueta impresa en la caja */
@@ -332,10 +335,8 @@ body.auth-mode .side, body.auth-mode .topbar, body.auth-mode .scrim { display: n
     </div>
     <nav class="nav" id="nav"></nav>
     <div class="side-foot">
-      <div class="conn"><span class="dot" id="connDot"></span><span id="connText">Sin conexión</span></div>
       <button type="button" id="btnUser" class="user-btn"></button>
       <button type="button" id="btnLogout"></button>
-      <button type="button" id="btnConfig"></button>
     </div>
   </aside>
   <div class="scrim" id="scrim"></div>
@@ -552,10 +553,7 @@ const db = {
 };
 const conUsuario = (args) => ({ ...args, p_usuario: auth.nombre || 'web' });
 
-function setConn(ok) {
-  $('#connDot').className = 'dot ' + (ok ? 'ok' : 'bad');
-  $('#connText').textContent = ok ? 'Conectado a Supabase' : 'Sin conexión';
-}
+function setConn() {}
 
 /* ------------------------------ UI básica ------------------------------ */
 function toast(msg, bad = false) {
@@ -690,7 +688,7 @@ async function formModal({ title, fields, values = {}, okLabel = 'Guardar', noti
 }
 
 /* --------------------------- Piezas visuales --------------------------- */
-const ESTADO_TXT = { ROJO: 'Vence < 30 d', AMARILLO: '30–60 días', VERDE: '> 60 días', CADUCADO: 'Caducado', AGOTADO: 'Agotado', BLOQUEADO: 'Bloqueado',
+const ESTADO_TXT = { VIGENTE: 'Vigente', ROJO: 'Vence < 30 d', AMARILLO: '30–60 días', VERDE: '> 60 días', CADUCADO: 'Caducado', AGOTADO: 'Agotado', BLOQUEADO: 'Bloqueado',
   REGISTRADA: 'Registrada', CANCELADA: 'Cancelada', ACTIVO: 'Activo', BAJA: 'De baja' };
 const pill = (s, txt) => `<span class="pill s-${esc(s)}">${esc(txt || ESTADO_TXT[s] || s)}</span>`;
 const lotLabel = (codigo, cad) => `<span class="lot"><b>${esc(codigo)}</b><small>CAD ${cadCorta(cad)}</small></span>`;
@@ -1356,6 +1354,44 @@ async function paginaTrazabilidad() {
 /* =====================================================================
    AUDITORÍA
    ===================================================================== */
+const TABLA_TXT = { producto: 'Producto', proveedor: 'Proveedor', cliente: 'Cliente', lote: 'Lote', venta: 'Venta' };
+const ACCION_TXT = { ALTA: 'Alta', MODIFICACION: 'Modificación', BAJA: 'Baja', REACTIVACION: 'Reactivación', CAMBIO_ESTADO: 'Cambio de estado', CANCELACION: 'Cancelación', ELIMINACION: 'Eliminación' };
+const CAMPO_TXT = { estado: 'Estado', codigo_lote: 'Lote', fecha_caducidad: 'Caducidad', cantidad_inicial: 'Recibido', cantidad_disponible: 'Existencia',
+  costo_unitario: 'Costo', motivo_bloqueo: 'Motivo de bloqueo', id_producto: 'Producto #', id_proveedor: 'Proveedor #', sku: 'SKU', nombre: 'Nombre',
+  precio_venta: 'Precio', stock_minimo: 'Stock mínimo', dias_minimos_venta: 'Vida mínima (días)', activo: 'Activo', rfc: 'RFC', telefono: 'Teléfono',
+  correo: 'Correo', id_cliente: 'Cliente #', id_unidad: 'Unidad #', motivo_cancelacion: 'Motivo', fecha_cancelacion: 'Cancelada el' };
+const OMITIR = new Set(['id_lote', 'id_venta', 'creado_en', 'fecha_entrada', 'fecha', 'usuario']);
+const fnFolio = (id) => 'V-' + String(id).padStart(6, '0');
+function valorBonito(k, v) {
+  if (v === true || v === 'true') return 'Sí';
+  if (v === false || v === 'false') return 'No';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return fecha(v);
+  if (/^\d{4}-\d{2}-\d{2}T/.test(v)) return fechaHora(v);
+  if (['costo_unitario', 'precio_venta'].includes(k) && !isNaN(Number(v))) return money(v);
+  if (k === 'estado') return ESTADO_TXT[v] || v;
+  return v;
+}
+function detalleBonito(a) {
+  const txt = String(a.detalle || '');
+  let pares = [];
+  if (txt.trim().startsWith('{')) {               // formato anterior (JSON)
+    try { pares = Object.entries(JSON.parse(txt)).map(([k, v]) => [k, v == null ? null : String(v)]); }
+    catch { pares = [...txt.matchAll(/"([a-z_]+)":\s*"?([^",}]*)"?/g)].map((m) => [m[1], m[2] === 'null' ? null : m[2]]); }
+  } else {
+    pares = txt.split('; ').filter(Boolean).map((seg) => { const i = seg.indexOf(': '); return i < 0 ? ['', seg] : [seg.slice(0, i), seg.slice(i + 2)]; });
+  }
+  const items = pares.filter(([k, v]) => !OMITIR.has(k) && v != null && v !== '')
+    .map(([k, v]) => {
+      const etiqueta = CAMPO_TXT[k] || k;
+      const flecha = String(v).split(' → ');
+      const val = flecha.length === 2
+        ? `<span class="muted">${esc(valorBonito(k, flecha[0] === '∅' ? '—' : flecha[0]))}</span> → <b>${esc(valorBonito(k, flecha[1] === '∅' ? '—' : flecha[1]))}</b>`
+        : esc(valorBonito(k, v));
+      return `<span class="kv">${k ? `<span class="muted">${esc(etiqueta)}:</span> ` : ''}${val}</span>`;
+    });
+  return items.length ? `<div class="kvs">${items.join('')}</div>` : '<span class="muted">—</span>';
+}
+
 async function paginaAuditoria() {
   const st = store.get('filtro.aud', { tabla: '', accion: '', texto: '' });
   view.innerHTML = `<div class="page-head"><div><h1>Auditoría</h1><p>Bitácora automática: cada alta, cambio, baja, cancelación y eliminación queda registrada con usuario y hora. Nadie la puede editar.</p></div></div>
@@ -1376,8 +1412,9 @@ async function paginaAuditoria() {
       const rows = await db.list('v_auditoria', { where, or: t ? [['usuario', 'ilike', `*${t}*`], ['detalle', 'ilike', `*${t}*`]] : null, order: 'id_auditoria.desc', limit: 300 });
       if (!vivo()) return;
       $('#cuenta').textContent = `${rows.length} registros${rows.length === 300 ? ' (los más recientes)' : ''}`;
-      $('#rows').innerHTML = rows.length ? rows.map((a) => `<tr><td style="white-space:nowrap">${fechaHora(a.fecha)}</td><td>${esc(a.tabla)}</td><td class="num mono">${a.id_registro}</td>
-        <td>${pill(COLOR[a.accion], a.accion.replace('_', ' ').toLowerCase())}</td><td>${esc(a.usuario)}</td><td class="mono" style="font-size:.74rem;max-width:520px;overflow-wrap:anywhere;color:var(--muted)">${esc(a.detalle)}</td></tr>`).join('')
+      $('#rows').innerHTML = rows.length ? rows.map((a) => `<tr><td style="white-space:nowrap">${fechaHora(a.fecha)}</td><td>${esc(TABLA_TXT[a.tabla] || a.tabla)}</td>
+        <td class="num mono">${a.tabla === 'venta' ? esc(fnFolio(a.id_registro)) : a.id_registro}</td>
+        <td>${pill(COLOR[a.accion], ACCION_TXT[a.accion] || a.accion)}</td><td>${esc(a.usuario)}</td><td style="min-width:260px">${detalleBonito(a)}</td></tr>`).join('')
         : emptyRow(6, 'Sin registros con este filtro', '');
     } catch (e) { $('#rows').innerHTML = emptyRow(6, 'No se pudo cargar la auditoría', ' ' + e.message); }
   };
@@ -1759,6 +1796,30 @@ function cambiarContrasena() {
     } });
 }
 
+/* Mi cuenta: nombre con el que se firma y cambio de contraseña. */
+function miCuenta() {
+  formModal({ title: 'Mi cuenta', okLabel: 'Guardar',
+    notice: '',
+    fields: [
+      { name: 'nombre', label: 'Nombre (así firmas ventas, mermas y cambios)', required: true, minLen: 3, max: 80, full: true },
+      { name: 'email', label: 'Correo', disabled: true, full: true },
+      { name: 'p1', label: 'Nueva contraseña (déjala vacía para no cambiarla)', type: 'password', full: true, minLen: 6 },
+      { name: 'p2', label: 'Repite la nueva contraseña', type: 'password', full: true }
+    ],
+    values: { nombre: (auth.user && auth.user.user_metadata && auth.user.user_metadata.nombre) || '', email: auth.user ? auth.user.email : '' },
+    onSubmit: async (d) => {
+      if ((d.p1 || d.p2) && d.p1 !== d.p2) throw new ApiError('Las contraseñas no coinciden.');
+      const body = { data: { nombre: d.nombre } };
+      if (d.p1) body.password = d.p1;
+      const res = await fetch(cfg.url.replace(/\/+$/, '') + '/auth/v1/user', { method: 'PUT',
+        headers: { apikey: cfg.key, Authorization: 'Bearer ' + auth.session.access_token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (!res.ok) throw new ApiError(d.p1 ? 'No se pudo guardar. La contraseña debe tener al menos 6 caracteres y ser distinta a la actual.' : 'No se pudo guardar el nombre.');
+      await auth.renovar();          // nuevo token con el nombre actualizado
+      pintaPie();
+      toast(d.p1 ? 'Nombre y contraseña actualizados.' : 'Nombre actualizado.');
+    } });
+}
+
 function entrarApp() {
   modoAuth(false);
   pintaPie();
@@ -1775,9 +1836,8 @@ async function cerrarSesion() {
 function pintaPie() {
   const ini = (auth.nombre || '?').trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
   $('#btnUser').innerHTML = `<span class="avatar">${esc(ini)}</span><span class="who"><b>${esc(auth.nombre || 'Sin sesión')}</b><small>${esc(auth.user ? auth.user.email : '')}</small></span>`;
-  $('#btnUser').title = 'Cambiar contraseña';
+  $('#btnUser').title = 'Mi cuenta: nombre y contraseña';
   $('#btnLogout').innerHTML = icon('logout').replace('<svg', '<svg width="16" height="16"') + '<span>Cerrar sesión</span>';
-  $('#btnConfig').innerHTML = icon('plug').replace('<svg', '<svg width="16" height="16"') + '<span>Conexión</span>';
 }
 
 /* =====================================================================
@@ -1819,10 +1879,8 @@ window.addEventListener('hashchange', () => { if (!location.hash.includes('acces
 $('#btnMenu').innerHTML = icon('menu').replace('<svg', '<svg width="18" height="18"');
 $('#btnMenu').addEventListener('click', () => document.body.classList.toggle('menu-open'));
 $('#scrim').addEventListener('click', () => document.body.classList.remove('menu-open'));
-$('#btnConfig').addEventListener('click', () => { $$('#nav a').forEach((a) => a.removeAttribute('aria-current')); paginaConexion(); document.body.classList.remove('menu-open'); });
-$('#btnUser').addEventListener('click', cambiarContrasena);
+$('#btnUser').addEventListener('click', miCuenta);
 $('#btnLogout').addEventListener('click', cerrarSesion);
-if (CONFIG.url) $('#btnConfig').hidden = true;
 pintaPie();
 leerRetornoAuth().then(() => { pintaPie(); router(); });
 </script>

@@ -8,6 +8,7 @@ Inventario por lotes con caducidad y despacho FEFO. Es la versión web del docum
 |---|---|
 | `index.html` | La aplicación completa. Un solo archivo, sin instalar nada. |
 | `sql/lotesmart_supabase.sql` | Base de datos: tablas, reglas, vistas, funciones, seguridad y datos de prueba. |
+| `sql/actualizacion_01_auditoria.sql` | Actualización sin borrar datos: auditoría legible (solo si instalaste antes del 19/11/2026). |
 | `tests/pruebas.sql` | 34 pruebas automáticas de reglas, seguridad y reportes (opcional). |
 
 ## Instalación (5 minutos)

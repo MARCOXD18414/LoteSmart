@@ -419,10 +419,12 @@ declare
 begin
   if tg_op = 'INSERT' then
     v_new := to_jsonb(new); v_id := (v_new->>v_pk)::bigint; v_accion := 'ALTA';
-    v_det := left(v_new::text, 500);
+    select left(string_agg(key || ': ' || value, '; '), 500) into v_det
+      from jsonb_each_text(v_new) where value is not null and key not in (v_pk, 'creado_en', 'fecha_entrada', 'fecha', 'usuario');
   elsif tg_op = 'DELETE' then
     v_old := to_jsonb(old); v_id := (v_old->>v_pk)::bigint; v_accion := 'ELIMINACION';
-    v_det := left(v_old::text, 500);
+    select left(string_agg(key || ': ' || value, '; '), 500) into v_det
+      from jsonb_each_text(v_old) where value is not null and key not in (v_pk, 'creado_en', 'fecha_entrada', 'fecha', 'usuario');
   else
     v_old := to_jsonb(old); v_new := to_jsonb(new); v_id := (v_new->>v_pk)::bigint;
     for k in select jsonb_object_keys(v_new) loop
