@@ -10,7 +10,8 @@ Inventario por lotes con caducidad y despacho FEFO. Es la versión web del docum
 | `sql/lotesmart_supabase.sql` | Base de datos: tablas, reglas, vistas, funciones, seguridad y datos de prueba. |
 | `sql/actualizacion_01_auditoria.sql` | Actualización sin borrar datos: auditoría legible (solo si instalaste antes del 19/11/2026). |
 | `sql/actualizacion_02_imagenes.sql` | Actualización sin borrar datos: fotos de productos (columna, función y bucket de Storage). |
-| `tests/pruebas.sql` | 34 pruebas automáticas de reglas, seguridad y reportes (opcional). |
+| `sql/actualizacion_03_roles.sql` | Actualización sin borrar datos: roles de usuario y permisos. |
+| `tests/pruebas.sql` | 48 pruebas automáticas de reglas, seguridad, roles y reportes (opcional). |
 
 ## Instalación (5 minutos)
 
@@ -40,6 +41,24 @@ Además: tablero de caducidad (valor en riesgo, no vendible, semáforo, alerta d
 
 ### Fotos de productos
 Cada producto puede llevar una foto (JPG, PNG o WebP). La app la reduce sola a 800 px antes de subirla a Supabase Storage (bucket público `productos`, máximo 2 MB). Se ve en el catálogo, en el detalle del producto y en el carrito de ventas. Solo usuarios con sesión pueden subir o quitar fotos.
+
+### Roles de usuario
+Cada cuenta tiene un rol. La primera cuenta de la instalación queda como **Administrador**; las demás entran como **Consulta** hasta que un administrador les asigna otro rol en **Usuarios y permisos**.
+
+| Permiso | Administrador | Almacén | Vendedor | Consulta |
+|---|:-:|:-:|:-:|:-:|
+| Productos y proveedores (alta, cambios, baja) | ✓ | ✓ | | |
+| Clientes (alta, cambios, baja) | ✓ | | ✓ | |
+| Entradas de lotes, correcciones y bloqueos | ✓ | ✓ | | |
+| Mermas y ajustes | ✓ | ✓ | | |
+| Registrar ventas | ✓ | | ✓ | |
+| Cancelar ventas | ✓ | | | |
+| Eliminar registros definitivamente | ✓ | | | |
+| Reportes | ✓ | ✓ | ✓ | ✓ |
+| Auditoría | ✓ | | | |
+| Usuarios y permisos | ✓ | | | |
+
+Todos pueden ver el tablero, los catálogos, los lotes, las ventas y la trazabilidad. Los permisos de cada rol se cambian con casillas en la misma pantalla. La base de datos valida el permiso en cada operación, así que no se puede saltar desde fuera de la app. Un usuario desactivado ya no ve ni registra nada, y siempre debe quedar al menos un administrador activo.
 
 ### Inicio de sesión
 Con Supabase Auth (correo y contraseña): iniciar sesión, crear cuenta, recuperar contraseña y cerrar sesión. La sesión se renueva sola mientras la app está abierta. Cada venta, merma y cambio queda firmado con el nombre del usuario que inició sesión; la firma la pone la base de datos a partir del token, así nadie puede firmar como otra persona.
@@ -82,7 +101,7 @@ Las 17 reglas de negocio del documento viven en la base de datos (triggers, CHEC
 - Sin sesión iniciada no se puede ver ni modificar nada: el rol `anon` no tiene permisos.
 - Con sesión (rol `authenticated`) se puede leer; RLS está activado en todas las tablas.
 - Todas las escrituras pasan por funciones (`producto_guardar`, `venta_registrar`, etc.). Cada una es una transacción completa y queda firmada con el usuario de la sesión.
-- Todos los usuarios con cuenta tienen los mismos permisos. Si necesitas roles (por ejemplo, que un vendedor no pueda eliminar), se agrega una tabla de perfiles con su rol.
+- Cada operación revisa el rol del usuario (ver **Roles de usuario**). Las tablas `rol`, `permiso`, `rol_permiso` y `usuario` guardan quién puede hacer qué.
 
 ## Caducados automáticos
 
@@ -90,4 +109,4 @@ El tablero ejecuta `marcar_caducados()` cada vez que se abre. Si quieres que cor
 
 ## Pruebas
 
-En el SQL Editor, después de instalar, ejecuta `tests/pruebas.sql`. Debe terminar con **34 de 34 aprobadas**. Al final vuelve a ejecutar el script principal para dejar los datos de prueba limpios.
+En el SQL Editor, después de instalar, ejecuta `tests/pruebas.sql`. Debe terminar con **48 de 48 aprobadas**. Al final vuelve a ejecutar el script principal para dejar los datos de prueba limpios.

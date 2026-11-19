@@ -1,7 +1,7 @@
 -- =====================================================================
 --  LoteSmart · Pruebas de integración (sección 13 del documento)
 --  Ejecútalo en Supabase → SQL Editor DESPUÉS de lotesmart_supabase.sql.
---  Resultado esperado: "34 de 34 aprobadas".
+--  Resultado esperado: "48 de 48 aprobadas".
 --  Modifica datos: al terminar vuelve a ejecutar lotesmart_supabase.sql.
 -- =====================================================================
 drop table if exists pg_temp.r;
@@ -23,6 +23,9 @@ $$ insert into r (prueba, ok, detalle) values (p_prueba, coalesce(p_cond, false)
 
 do $$
 declare v_antes bigint; v_sim jsonb; v_v2 bigint; v_leche int; v_para int; v_yog int;
+  c_ana  text := '{"sub":"aaaaaaaa-0000-0000-0000-000000000001","email":"ana@lotesmart.mx"}';
+  c_vero text := '{"sub":"aaaaaaaa-0000-0000-0000-000000000002","email":"vero@lotesmart.mx"}';
+  c_caro text := '{"sub":"aaaaaaaa-0000-0000-0000-000000000003","email":"caro@lotesmart.mx"}';
 begin
   select id_producto into v_leche from producto where sku = 'LEC-001';
   select id_producto into v_para  from producto where sku = 'PAR-500';
@@ -33,8 +36,15 @@ begin
   perform pg_temp.espera_error('Sin sesión no se registran ventas', $q$select venta_registrar(1, '[{"id_producto":1,"cantidad":1}]', 'x')$q$);
   reset role;
 
-  -- Con sesión: rol authenticated y token de Supabase Auth (firma con el nombre del usuario).
-  perform set_config('request.jwt.claims', '{"email":"ana@lotesmart.mx","user_metadata":{"nombre":"Ana López"}}', true);
+  -- Perfiles de prueba: Administradora, Vendedora y Consulta.
+  delete from usuario where auth_id::text like 'aaaaaaaa-0000-0000-0000-%';
+  insert into usuario (auth_id, email, nombre, id_rol) values
+    ('aaaaaaaa-0000-0000-0000-000000000001', 'ana@lotesmart.mx',  'Ana López',      (select id_rol from rol where clave = 'ADMIN')),
+    ('aaaaaaaa-0000-0000-0000-000000000002', 'vero@lotesmart.mx', 'Vero Vendedora', (select id_rol from rol where clave = 'VENDEDOR')),
+    ('aaaaaaaa-0000-0000-0000-000000000003', 'caro@lotesmart.mx', 'Caro Consulta',  (select id_rol from rol where clave = 'CONSULTA'));
+
+  -- Con sesión: rol authenticated y token de Supabase Auth de Ana (Administradora).
+  perform set_config('request.jwt.claims', c_ana, true);
   set local role authenticated;
 
   perform pg_temp.espera_error('Lote con caducidad de ayer',
@@ -123,6 +133,44 @@ begin
       = (select sum(cantidad_disponible) from lote where id_producto = v_leche), 'ok');
   perform pg_temp.espera('Inventario valorizado = tablero',
     (select sum(valor_en_riesgo) from rpt_inventario()) = (select valor_en_riesgo from v_tablero), 'ok');
+
+  -- Roles: Vendedora
+  perform set_config('request.jwt.claims', c_vero, true);
+  perform pg_temp.espera('Vendedor registra ventas',
+    venta_registrar(1, jsonb_build_array(jsonb_build_object('id_producto', v_leche, 'cantidad', 1)), 'x') is not null, 'ok');
+  perform pg_temp.espera_error('Vendedor no cancela ventas', format($q$select venta_cancelar(%s, 'x', 'x')$q$, (select max(id_venta) from venta)));
+  perform pg_temp.espera_error('Vendedor no registra lotes',
+    format($q$select lote_alta(%s, 1, 'V-LOTE', fn_hoy() + 30, 10, 5, 'x')$q$, v_leche));
+  perform pg_temp.espera('Vendedor no ve la auditoría', (select count(*) from v_auditoria) = 0, 'ok');
+  perform pg_temp.espera('Vendedor solo ve su propio perfil', (select count(*) from usuario) = 1, 'ok');
+  perform pg_temp.espera('La venta queda firmada por la vendedora',
+    (select usuario from venta order by id_venta desc limit 1) = 'Vero Vendedora', (select usuario from venta order by id_venta desc limit 1));
+  perform pg_temp.espera_error('Vendedor no administra usuarios',
+    $q$select usuario_actualizar((select id_usuario from usuario limit 1), 'X', 1, true, 'x')$q$);
+
+  -- Roles: Consulta
+  perform set_config('request.jwt.claims', c_caro, true);
+  perform pg_temp.espera_error('Consulta no da de alta productos',
+    $q$select producto_guardar(null, 'CON-1', 'Producto consulta', 1, 10, 0, 0, 'x')$q$);
+  perform pg_temp.espera('Consulta sí ve inventario y reportes',
+    (select count(*) from v_producto) > 0 and (select count(*) from rpt_inventario()) > 0, 'ok');
+
+  -- Administración
+  perform set_config('request.jwt.claims', c_ana, true);
+  perform pg_temp.espera_error('No se puede quitar el último administrador',
+    format($q$select usuario_actualizar(%s, 'Ana López', %s, true, 'x')$q$,
+      (select id_usuario from usuario where email = 'ana@lotesmart.mx'), (select id_rol from rol where clave = 'CONSULTA')));
+  perform pg_temp.espera_error('Administrador conserva la gestión de usuarios',
+    format($q$select rol_permiso_cambiar(%s, 'usuarios.administrar', false, 'x')$q$, (select id_rol from rol where clave = 'ADMIN')));
+  perform rol_permiso_cambiar((select id_rol from rol where clave = 'VENDEDOR'), 'ventas.cancelar', true, 'x');
+  perform usuario_actualizar((select id_usuario from usuario where email = 'caro@lotesmart.mx'), 'Caro Consulta', (select id_rol from rol where clave = 'CONSULTA'), false, 'x');
+  perform set_config('request.jwt.claims', c_vero, true);
+  perform venta_cancelar((select max(id_venta) from venta), 'Prueba de permiso', 'x');
+  perform pg_temp.espera('Permiso concedido al rol aplica de inmediato',
+    (select estado from venta order by id_venta desc limit 1) = 'CANCELADA', 'ok');
+  perform set_config('request.jwt.claims', c_caro, true);
+  perform pg_temp.espera('Usuario desactivado no ve datos', (select count(*) from v_producto) = 0, 'ok');
+  perform pg_temp.espera_error('Usuario desactivado no opera', $q$select marcar_caducados()$q$);
 end $$;
 
 select n, case when ok then 'APROBADA' else 'FALLÓ' end as estado, prueba, left(detalle, 120) as detalle

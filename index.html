@@ -146,6 +146,8 @@ tr.off td { color: var(--muted) }
 .foto-grande { width: 160px; height: 160px; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: var(--surface-2); display: grid; place-items: center; flex: none }
 .foto-grande img { width: 100%; height: 100%; object-fit: cover }
 .foto-grande .thumb { border: 0 }
+.matriz td.center, .matriz th.center { text-align: center }
+.matriz input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer }
 .kvs { display: flex; flex-wrap: wrap; gap: 4px 6px }
 .kv { background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; font-size: .78rem; white-space: nowrap }
 .tag { display: inline-block; font-size: .7rem; font-weight: 600; padding: 1px 7px; border-radius: 5px; background: var(--amber-soft); color: var(--amber); margin-left: 6px; vertical-align: middle }
@@ -474,14 +476,15 @@ const MSG_AUTH = [
 const auth = {
   session: store.get('session', null),
   get user() { return this.session && this.session.user; },
-  get nombre() { const u = this.user; return u ? ((u.user_metadata && u.user_metadata.nombre) || u.email) : ''; },
+  get nombre() { if (this.perfil) return this.perfil.nombre; const u = this.user; return u ? ((u.user_metadata && u.user_metadata.nombre) || u.email) : ''; },
   guardar(data) {
     this.session = { access_token: data.access_token, refresh_token: data.refresh_token, user: data.user,
       expires_at: data.expires_at || Math.floor(Date.now() / 1000) + (data.expires_in || 3600) };
     store.set('session', this.session);
     cfg.usuario = this.nombre;
   },
-  limpiar() { this.session = null; store.set('session', null); },
+  limpiar() { this.session = null; this.perfil = null; store.set('session', null); },
+  perfil: null,
   async llamar(path, body, token) {
     let res;
     try {
@@ -524,6 +527,16 @@ const auth = {
 if (auth.session) cfg.usuario = auth.nombre;
 
 class SesionExpirada extends ApiError {}
+const puede = (p) => !!(auth.perfil && auth.perfil.activo && (auth.perfil.permisos || []).includes(p));
+async function cargarPerfil() {
+  auth.perfil = await db.rpc('mi_perfil');
+  if (!auth.perfil.activo) {
+    await auth.salir();
+    throw new SesionExpirada('Tu usuario está desactivado. Habla con un administrador de LoteSmart.');
+  }
+  cfg.usuario = auth.perfil.nombre;
+  return auth.perfil;
+}
 async function req(path, opts = {}, reintento = false) {
   if (!cfg.url || !cfg.key) throw new ApiError('Configura la conexión con Supabase.');
   if (!auth.session) throw new SesionExpirada('Inicia sesión para continuar.');
@@ -801,7 +814,7 @@ const RFC = /^[A-ZÑ&]{3,4}[0-9]{6}[A-Z0-9]{3}$/;
    ===================================================================== */
 const CATALOGOS = {
   productos: {
-    titulo: 'Productos', singular: 'producto', icon: 'tag', vista: 'v_producto', pk: 'id_producto', orden: 'nombre.asc',
+    perm: 'catalogo.editar', titulo: 'Productos', singular: 'producto', icon: 'tag', vista: 'v_producto', pk: 'id_producto', orden: 'nombre.asc',
     desc: 'Catálogo de lo que se vende. Define precio, stock mínimo para la alerta de reorden y la vida útil mínima que debe tener un lote para venderse.',
     buscar: ['sku', 'nombre'], placeholder: 'Consultar por SKU o nombre',
     nombre: (r) => r.nombre,
@@ -851,7 +864,7 @@ const CATALOGOS = {
     }
   },
   proveedores: {
-    titulo: 'Proveedores', singular: 'proveedor', icon: 'truck', vista: 'v_proveedor', pk: 'id_proveedor', orden: 'nombre.asc',
+    perm: 'catalogo.editar', titulo: 'Proveedores', singular: 'proveedor', icon: 'truck', vista: 'v_proveedor', pk: 'id_proveedor', orden: 'nombre.asc',
     desc: 'Quién entrega cada lote. Un proveedor dado de baja ya no puede registrar entradas.',
     buscar: ['rfc', 'nombre'], placeholder: 'Consultar por RFC o razón social',
     nombre: (r) => r.nombre,
@@ -878,7 +891,7 @@ const CATALOGOS = {
     }
   },
   clientes: {
-    titulo: 'Clientes', singular: 'cliente', icon: 'users', vista: 'v_cliente', pk: 'id_cliente', orden: 'nombre.asc',
+    perm: 'clientes.editar', titulo: 'Clientes', singular: 'cliente', icon: 'users', vista: 'v_cliente', pk: 'id_cliente', orden: 'nombre.asc',
     desc: 'A quién se le vende. Con esta tabla la trazabilidad te dice a qué clientes llegó cada lote.',
     buscar: ['nombre', 'rfc'], placeholder: 'Consultar por nombre o RFC',
     nombre: (r) => r.nombre,
@@ -920,7 +933,7 @@ async function paginaCatalogo(key) {
   const st = store.get('filtro.' + key, { texto: '', estado: 'activos' });
   view.innerHTML = `
     <div class="page-head"><div><h1>${C.titulo}</h1><p>${C.desc}</p></div>
-      <button class="btn primary" type="button" id="btnNuevo">${icon('plus')}Nuevo ${C.singular}</button></div>
+      ${puede(C.perm) ? `<button class="btn primary" type="button" id="btnNuevo">${icon('plus')}Nuevo ${C.singular}</button>` : ''}</div>
     <div class="card">
       <div class="card-head">
         <div class="toolbar" style="flex:1">
@@ -947,9 +960,9 @@ async function paginaCatalogo(key) {
     $('#rows').innerHTML = datos.length ? datos.map((r) => `<tr class="click${r.activo ? '' : ' off'}" data-id="${r[C.pk]}">
         ${C.cols.map(([, fn, cls]) => `<td class="${cls || ''}">${fn(r)}</td>`).join('')}
         <td><div class="row-actions">
-          ${btn('editar', 'Editar', 'edit')}
-          ${r.activo ? btn('baja', 'Baja', 'archive') : btn('reactivar', 'Reactivar', 'restore')}
-          ${btn('eliminar', 'Eliminar', 'trash', 'danger')}
+          ${puede(C.perm) ? btn('editar', 'Editar', 'edit') + (r.activo ? btn('baja', 'Baja', 'archive') : btn('reactivar', 'Reactivar', 'restore')) : ''}
+          ${puede('registros.eliminar') ? btn('eliminar', 'Eliminar', 'trash', 'danger') : ''}
+          ${!puede(C.perm) && !puede('registros.eliminar') ? btn('ver', 'Ver', 'search') : ''}
         </div></td></tr>`).join('')
       : emptyRow(C.cols.length + 1, t ? 'Sin resultados' : `No hay ${C.titulo.toLowerCase()} ${st.estado === 'baja' ? 'dados de baja' : 'todavía'}`, t ? ' Prueba con otra búsqueda o cambia el filtro.' : ` Usa “Nuevo ${C.singular}” para dar de alta el primero.`);
   };
@@ -959,7 +972,7 @@ async function paginaCatalogo(key) {
     st.estado = b.dataset.estado; guardaFiltro();
     $$('[data-estado]').forEach((x) => x.setAttribute('aria-pressed', x === b)); cargar();
   }));
-  $('#btnNuevo').addEventListener('click', () => altaOEdicion(C, null, cargar));
+  if ($('#btnNuevo')) $('#btnNuevo').addEventListener('click', () => altaOEdicion(C, null, cargar));
   $('#rows').addEventListener('click', (e) => {
     const tr = e.target.closest('tr[data-id]'); if (!tr) return;
     const r = datos.find((d) => String(d[C.pk]) === tr.dataset.id);
@@ -1001,10 +1014,10 @@ async function verCatalogo(C, r, recargar) {
     title: C.nombre(r), size: 'lg',
     body: `<div class="detalle-top">${C.vista === 'v_producto' ? `<div class="foto-grande">${r.imagen_path ? `<img src="${esc(imgUrl(r.imagen_path))}" alt="${esc(r.nombre)}">` : thumb(null, r.nombre, 120)}</div>` : ''}
       <dl class="facts" style="flex:1">${C.hechos(r).map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl></div><div id="rel"><div class="skeleton"></div></div>`,
-    foot: `${btn('eliminar', 'Eliminar', 'trash', 'danger')}<span class="spacer"></span>
-      ${r.activo ? btn('baja', 'Dar de baja', 'archive') : btn('reactivar', 'Reactivar', 'restore')}${btn('editar', 'Editar', 'edit', 'primary')}`
+    foot: (puede(C.perm) || puede('registros.eliminar')) ? `${puede('registros.eliminar') ? btn('eliminar', 'Eliminar', 'trash', 'danger') : ''}<span class="spacer"></span>
+      ${puede(C.perm) ? (r.activo ? btn('baja', 'Dar de baja', 'archive') : btn('reactivar', 'Reactivar', 'restore')) + btn('editar', 'Editar', 'edit', 'primary') : ''}` : ''
   });
-  $('.modal-foot', ov).addEventListener('click', (e) => {
+  if ($('.modal-foot', ov)) $('.modal-foot', ov).addEventListener('click', (e) => {
     const a = e.target.closest('[data-action]'); if (!a) return;
     if (a.dataset.action === 'editar') { closeModal(ov); altaOEdicion(C, r, recargar); }
     else accionCatalogo(C, a.dataset.action, r, recargar);
@@ -1018,6 +1031,7 @@ async function verCatalogo(C, r, recargar) {
 async function paginaTablero() {
   view.innerHTML = `<div class="page-head"><div><h1>Tablero de caducidad</h1><p>Lo que está por vencer, lo que ya no se puede vender y lo que hay que volver a pedir.</p></div>
     <button class="btn" type="button" id="btnRef">${icon('restore')}Actualizar</button></div>
+    ${auth.perfil && auth.perfil.rol === 'CONSULTA' ? `<div class="notice warn">Tu rol es <b>Consulta</b>: puedes ver todo y generar reportes, pero no registrar ni modificar. Si necesitas más permisos, pídeselos a un administrador.</div>` : ''}
     <div class="kpis" id="kpis">${'<div class="card kpi"><div class="skeleton"></div></div>'.repeat(4)}</div>
     <div class="card card-pad" id="sem"></div>
     <div class="grid-2">
@@ -1174,10 +1188,10 @@ async function verLote(id, recargar) {
         : '<p class="muted" style="margin:0">Todavía no se ha vendido nada de este lote.</p>'}`;
     const foot = document.createElement('div');
     foot.className = 'modal-foot';
-    foot.innerHTML = `${btn('eliminar', 'Eliminar', 'trash', 'danger', l.tiene_movimientos ? 'disabled title="Tiene movimientos"' : '')}<span class="spacer"></span>
-      ${btn('merma', 'Merma', 'drop', '', l.cantidad_disponible > 0 ? '' : 'disabled')}${btn('ajuste', 'Ajuste', 'scale')}
-      ${l.estado === 'BLOQUEADO' ? btn('desbloquear', 'Desbloquear', 'unlock') : btn('bloquear', 'Bloquear', 'lock')}${btn('editar', 'Editar', 'edit', 'primary')}`;
-    $('.modal', ov).append(foot);
+    foot.innerHTML = `${puede('registros.eliminar') ? btn('eliminar', 'Eliminar', 'trash', 'danger', l.tiene_movimientos ? 'disabled title="Tiene movimientos"' : '') : ''}<span class="spacer"></span>
+      ${puede('inventario.ajustar') ? btn('merma', 'Merma', 'drop', '', l.cantidad_disponible > 0 ? '' : 'disabled') + btn('ajuste', 'Ajuste', 'scale') : ''}
+      ${puede('lotes.editar') ? (l.estado === 'BLOQUEADO' ? btn('desbloquear', 'Desbloquear', 'unlock') : btn('bloquear', 'Bloquear', 'lock')) + btn('editar', 'Editar', 'edit', 'primary') : ''}`;
+    if (puede('registros.eliminar') || puede('inventario.ajustar') || puede('lotes.editar')) $('.modal', ov).append(foot);
     foot.addEventListener('click', (e) => {
       const a = e.target.closest('[data-action]'); if (!a) return;
       if (['editar', 'merma', 'ajuste'].includes(a.dataset.action)) closeModal(ov);
@@ -1191,7 +1205,7 @@ async function paginaLotes() {
   const FILTROS = [['existencia', 'Con existencia'], ['ROJO', 'Vence < 30 d'], ['AMARILLO', '30–60 d'], ['VERDE', '> 60 d'], ['CADUCADO', 'Caducados'], ['BLOQUEADO', 'Bloqueados'], ['AGOTADO', 'Agotados'], ['todos', 'Todos']];
   view.innerHTML = `
     <div class="page-head"><div><h1>Lotes</h1><p>Cada entrada de mercancía con su caducidad. La existencia solo cambia con ventas, mermas, ajustes y devoluciones.</p></div>
-      <button class="btn primary" type="button" id="btnNuevo">${icon('plus')}Entrada de lote</button></div>
+      ${puede('lotes.editar') ? `<button class="btn primary" type="button" id="btnNuevo">${icon('plus')}Entrada de lote</button>` : ''}</div>
     <div class="card">
       <div class="card-head" style="flex-direction:column;align-items:stretch;gap:12px">
         <div class="toolbar">
@@ -1221,16 +1235,17 @@ async function paginaLotes() {
       <td>${lotLabel(l.codigo_lote, l.fecha_caducidad)}</td><td>${esc(l.producto)}</td><td class="hide-sm">${esc(l.proveedor)}</td>
       <td class="num">${int(l.cantidad_disponible)} <span class="muted">/ ${int(l.cantidad_inicial)}</span></td><td class="num">${dias(l.dias_restantes)}</td>
       <td>${pill(l.semaforo)}</td><td class="num hide-sm">${money(l.valor_existencia)}</td>
-      <td><div class="row-actions">${btn('editar', 'Editar', 'edit')}${btn('merma', 'Merma', 'drop', '', l.cantidad_disponible > 0 ? '' : 'disabled')}
-        ${l.estado === 'BLOQUEADO' ? btn('desbloquear', 'Desbloquear', 'unlock') : btn('bloquear', 'Bloquear', 'lock')}
-        ${btn('eliminar', 'Eliminar', 'trash', 'danger', l.tiene_movimientos ? 'disabled title="Tiene movimientos: no se puede eliminar"' : '')}</div></td></tr>`).join('')
+      <td><div class="row-actions">${puede('lotes.editar') ? btn('editar', 'Editar', 'edit') : ''}${puede('inventario.ajustar') ? btn('merma', 'Merma', 'drop', '', l.cantidad_disponible > 0 ? '' : 'disabled') : ''}
+        ${puede('lotes.editar') ? (l.estado === 'BLOQUEADO' ? btn('desbloquear', 'Desbloquear', 'unlock') : btn('bloquear', 'Bloquear', 'lock')) : ''}
+        ${puede('registros.eliminar') ? btn('eliminar', 'Eliminar', 'trash', 'danger', l.tiene_movimientos ? 'disabled title="Tiene movimientos: no se puede eliminar"' : '') : ''}
+        ${!puede('lotes.editar') && !puede('inventario.ajustar') ? btn('ver', 'Ver', 'search') : ''}</div></td></tr>`).join('')
       : emptyRow(8, 'No hay lotes con este filtro', ' Cambia el filtro o registra una entrada de lote.');
   };
   const guarda = () => store.set('filtro.lotes', st);
   $('#q').addEventListener('input', debounce((e) => { st.texto = e.target.value; guarda(); cargar(); }));
   $('#vence').addEventListener('input', debounce((e) => { st.vence = e.target.value; guarda(); cargar(); }));
   $$('[data-f]').forEach((b) => b.addEventListener('click', () => { st.estado = b.dataset.f; guarda(); $$('[data-f]').forEach((x) => x.setAttribute('aria-pressed', x === b)); cargar(); }));
-  $('#btnNuevo').addEventListener('click', () => altaLote(cargar));
+  if ($('#btnNuevo')) $('#btnNuevo').addEventListener('click', () => altaLote(cargar));
   $('#rows').addEventListener('click', (e) => {
     const tr = e.target.closest('tr[data-id]'); if (!tr) return;
     const l = datos.find((d) => String(d.id_lote) === tr.dataset.id);
@@ -1248,7 +1263,7 @@ async function paginaVentas() {
   const st = store.get('filtro.ventas', { texto: '', estado: 'todas', desde: '', hasta: '' });
   view.innerHTML = `
     <div class="page-head"><div><h1>Ventas</h1><p>Cada venta se surte sola con FEFO: primero sale lo que vence antes. Una venta no se edita; se cancela y las unidades regresan a su lote.</p></div></div>
-    <div class="grid-sale">
+    <div class="grid-sale"${puede('ventas.registrar') ? '' : ' hidden'}>
       <div class="card">
         <div class="card-head"><h2>Nueva venta</h2><span class="muted" id="cartCount"></span></div>
         <div class="card-pad" style="display:flex;flex-direction:column;gap:14px">
@@ -1361,7 +1376,7 @@ async function paginaVentas() {
     $('#rows').innerHTML = datos.length ? datos.map((v) => `<tr class="click${v.estado === 'CANCELADA' ? ' off' : ''}" data-id="${v.id_venta}">
       <td class="mono">${esc(v.folio)}</td><td>${fechaHora(v.fecha)}</td><td>${esc(v.cliente)}</td><td class="num hide-sm">${int(v.unidades)}</td>
       <td class="num">${money(v.total)}</td><td class="num hide-sm">${money(v.margen_bruto)}</td><td>${pill(v.estado)}</td>
-      <td><div class="row-actions">${btn('ver', 'Ver', 'search')}${btn('cancelar', 'Cancelar', 'ban', 'danger', v.estado === 'CANCELADA' ? 'disabled' : '')}</div></td></tr>`).join('')
+      <td><div class="row-actions">${btn('ver', 'Ver', 'search')}${puede('ventas.cancelar') ? btn('cancelar', 'Cancelar', 'ban', 'danger', v.estado === 'CANCELADA' ? 'disabled' : '') : ''}</div></td></tr>`).join('')
       : emptyRow(8, 'Sin ventas con este filtro', ' Cambia las fechas o el texto de búsqueda.');
   };
   const guarda = () => store.set('filtro.ventas', st);
@@ -1389,8 +1404,8 @@ async function cancelarVenta(v, recargar) {
 }
 async function verVenta(v, recargar) {
   const ov = openModal({ title: `Venta ${v.folio}`, size: 'lg', body: '<div class="loading"><div class="skeleton"></div></div>',
-    foot: `<span class="spacer"></span>${btn('cancelar', 'Cancelar venta', 'ban', 'danger', v.estado === 'CANCELADA' ? 'disabled' : '')}` });
-  $('.modal-foot', ov).addEventListener('click', (e) => { if (e.target.closest('[data-action="cancelar"]')) cancelarVenta(v, recargar); });
+    foot: puede('ventas.cancelar') ? `<span class="spacer"></span>${btn('cancelar', 'Cancelar venta', 'ban', 'danger', v.estado === 'CANCELADA' ? 'disabled' : '')}` : '' });
+  if ($('.modal-foot', ov)) $('.modal-foot', ov).addEventListener('click', (e) => { if (e.target.closest('[data-action="cancelar"]')) cancelarVenta(v, recargar); });
   try {
     const movs = await db.list('v_movimiento_detalle', { where: [['id_venta', 'eq', v.id_venta]], order: 'id_movimiento.asc' });
     $('.modal-body', ov).innerHTML = `
@@ -1531,13 +1546,13 @@ async function paginaTrazabilidad() {
 /* =====================================================================
    AUDITORÍA
    ===================================================================== */
-const TABLA_TXT = { producto: 'Producto', proveedor: 'Proveedor', cliente: 'Cliente', lote: 'Lote', venta: 'Venta' };
+const TABLA_TXT = { producto: 'Producto', proveedor: 'Proveedor', cliente: 'Cliente', lote: 'Lote', venta: 'Venta', usuario: 'Usuario', rol_permiso: 'Permisos' };
 const ACCION_TXT = { ALTA: 'Alta', MODIFICACION: 'Modificación', BAJA: 'Baja', REACTIVACION: 'Reactivación', CAMBIO_ESTADO: 'Cambio de estado', CANCELACION: 'Cancelación', ELIMINACION: 'Eliminación' };
 const CAMPO_TXT = { estado: 'Estado', codigo_lote: 'Lote', fecha_caducidad: 'Caducidad', cantidad_inicial: 'Recibido', cantidad_disponible: 'Existencia',
   costo_unitario: 'Costo', motivo_bloqueo: 'Motivo de bloqueo', id_producto: 'Producto #', id_proveedor: 'Proveedor #', sku: 'SKU', nombre: 'Nombre',
   precio_venta: 'Precio', stock_minimo: 'Stock mínimo', dias_minimos_venta: 'Vida mínima (días)', activo: 'Activo', rfc: 'RFC', telefono: 'Teléfono',
-  correo: 'Correo', imagen_path: 'Foto', id_cliente: 'Cliente #', id_unidad: 'Unidad #', motivo_cancelacion: 'Motivo', fecha_cancelacion: 'Cancelada el' };
-const OMITIR = new Set(['id_lote', 'id_venta', 'creado_en', 'fecha_entrada', 'fecha', 'usuario']);
+  correo: 'Correo', imagen_path: 'Foto', email: 'Correo', id_rol: 'Rol #', rol: 'Rol', permiso: 'Permiso', id_cliente: 'Cliente #', id_unidad: 'Unidad #', motivo_cancelacion: 'Motivo', fecha_cancelacion: 'Cancelada el' };
+const OMITIR = new Set(['id_lote', 'id_venta', 'id_usuario', 'auth_id', 'creado_en', 'fecha_entrada', 'fecha', 'usuario']);
 const fnFolio = (id) => 'V-' + String(id).padStart(6, '0');
 function valorBonito(k, v) {
   if (v === true || v === 'true') return 'Sí';
@@ -1573,7 +1588,7 @@ async function paginaAuditoria() {
   const st = store.get('filtro.aud', { tabla: '', accion: '', texto: '' });
   view.innerHTML = `<div class="page-head"><div><h1>Auditoría</h1><p>Bitácora automática: cada alta, cambio, baja, cancelación y eliminación queda registrada con usuario y hora. Nadie la puede editar.</p></div></div>
     <div class="card"><div class="card-head"><div class="toolbar" style="flex:1">
-      <select class="input" id="tabla" style="width:auto" aria-label="Tabla"><option value="">Todas las tablas</option>${['producto', 'proveedor', 'cliente', 'lote', 'venta'].map((t) => `<option${st.tabla === t ? ' selected' : ''}>${t}</option>`).join('')}</select>
+      <select class="input" id="tabla" style="width:auto" aria-label="Tabla"><option value="">Todas las tablas</option>${['producto', 'proveedor', 'cliente', 'lote', 'venta', 'usuario', 'rol_permiso'].map((t) => `<option value="${t}"${st.tabla === t ? ' selected' : ''}>${TABLA_TXT[t]}</option>`).join('')}</select>
       <select class="input" id="accion" style="width:auto" aria-label="Acción"><option value="">Todas las acciones</option>${['ALTA', 'MODIFICACION', 'BAJA', 'REACTIVACION', 'CAMBIO_ESTADO', 'CANCELACION', 'ELIMINACION'].map((a) => `<option${st.accion === a ? ' selected' : ''}>${a}</option>`).join('')}</select>
       <label class="search">${icon('search')}<input class="input" id="q" type="search" placeholder="Usuario o texto del cambio" value="${esc(st.texto)}" aria-label="Buscar en auditoría"></label>
     </div><span class="muted" id="cuenta"></span></div>
@@ -1854,6 +1869,83 @@ document.addEventListener('mouseover', (e) => {
 window.addEventListener('scroll', () => { tip.hidden = true; }, { passive: true });
 
 /* =====================================================================
+   USUARIOS Y PERMISOS (solo administradores)
+   ===================================================================== */
+async function paginaUsuarios() {
+  view.innerHTML = `<div class="page-head"><div><h1>Usuarios y permisos</h1>
+      <p>Asigna el rol de cada persona y decide qué puede hacer cada rol. Los cambios aplican en la siguiente acción del usuario.</p></div></div>
+    <div class="notice">Para agregar a alguien: que cree su cuenta en la pantalla de inicio (<b>Crear cuenta</b>) o créala en Supabase → Authentication → Users. Entra con rol <b>Consulta</b> y aquí le asignas el que le corresponda.</div>
+    <div class="card"><div class="card-head"><h2>Usuarios</h2><span class="muted" id="cuentaU"></span></div>
+      <div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Correo</th><th>Rol</th><th>Estado</th><th class="hide-sm">Alta</th><th class="num">Acciones</th></tr></thead><tbody id="rowsU">${loadingRow(6)}</tbody></table></div></div>
+    <div class="card"><div class="card-head"><h2>Permisos por rol</h2><span class="muted">Marca o desmarca: se guarda al momento</span></div>
+      <div class="table-wrap"><table class="matriz"><thead id="headM"></thead><tbody id="rowsM">${loadingRow(5)}</tbody></table></div></div>`;
+  const marca = view.firstElementChild;
+  let usuarios = [], roles = [], permisos = [], rp = new Set();
+  const cargar = async () => {
+    try {
+      [usuarios, roles, permisos] = await Promise.all([
+        db.list('usuario', { order: 'nombre.asc' }), db.list('rol', { order: 'id_rol.asc' }), db.list('permiso', { order: 'orden.asc' })]);
+      rp = new Set((await db.list('rol_permiso')).map((x) => x.id_rol + '|' + x.permiso));
+    } catch (e) { if (marca.isConnected) $('#rowsU').innerHTML = emptyRow(6, 'No se pudo cargar', ' ' + e.message); return; }
+    if (!marca.isConnected) return;
+    const rolNombre = (id) => (roles.find((r) => r.id_rol === id) || {}).nombre || '—';
+    $('#cuentaU').textContent = pl(usuarios.length, 'usuario', 'usuarios');
+    $('#rowsU').innerHTML = usuarios.map((u) => `<tr class="${u.activo ? '' : 'off'}" data-id="${u.id_usuario}">
+      <td><div class="prod-cell"><span class="avatar" style="width:28px;height:28px;font-size:.7rem">${esc(iniciales(u.nombre))}</span><b>${esc(u.nombre)}</b>${u.email === (auth.user && auth.user.email) ? ' <span class="tag" style="background:var(--accent-soft);color:var(--accent-strong)">Tú</span>' : ''}</div></td>
+      <td class="mono nw">${esc(u.email)}</td>
+      <td><select class="input" data-rol style="min-width:150px" aria-label="Rol de ${esc(u.nombre)}">${roles.map((r) => `<option value="${r.id_rol}"${r.id_rol === u.id_rol ? ' selected' : ''}>${esc(r.nombre)}</option>`).join('')}</select></td>
+      <td>${pill(u.activo ? 'ACTIVO' : 'BAJA', u.activo ? 'Activo' : 'Desactivado')}</td>
+      <td class="hide-sm nw">${fecha(u.creado_en)}</td>
+      <td><div class="row-actions">${btn('nombre', 'Editar nombre', 'edit')}${u.activo ? btn('desactivar', 'Desactivar', 'ban', 'danger') : btn('activar', 'Activar', 'restore')}</div></td></tr>`).join('');
+    $('#headM').innerHTML = `<tr><th>Permiso</th>${roles.map((r) => `<th class="center" title="${esc(r.descripcion || '')}">${esc(r.nombre)}</th>`).join('')}</tr>`;
+    $('#rowsM').innerHTML = permisos.map((p) => `<tr><td>${esc(p.descripcion)}</td>${roles.map((r) => {
+      const fijo = r.clave === 'ADMIN' && p.clave === 'usuarios.administrar';
+      return `<td class="center"><input type="checkbox" data-rp="${r.id_rol}|${p.clave}"${rp.has(r.id_rol + '|' + p.clave) ? ' checked' : ''}${fijo ? ' disabled title="El Administrador siempre conserva este permiso"' : ''} aria-label="${esc(r.nombre)}: ${esc(p.descripcion)}"></td>`;
+    }).join('')}</tr>`).join('');
+  };
+  const guardar = async (u, cambios, ok) => {
+    const d = { ...u, ...cambios };
+    try {
+      await db.rpc('usuario_actualizar', conUsuario({ p_id_usuario: u.id_usuario, p_nombre: d.nombre, p_id_rol: Number(d.id_rol), p_activo: d.activo }));
+      toast(ok);
+      if (u.email === (auth.user && auth.user.email)) { await cargarPerfil(); pintaNav(); pintaPie(); if (!puede('usuarios.administrar')) { location.hash = '#tablero'; return; } }
+    } catch (e) { fallo(e); }
+    cargar();
+  };
+  $('#rowsU').addEventListener('change', (e) => {
+    const sel = e.target.closest('[data-rol]'); if (!sel) return;
+    const u = usuarios.find((x) => String(x.id_usuario) === sel.closest('tr').dataset.id);
+    guardar(u, { id_rol: Number(sel.value) }, `${u.nombre} ahora es ${sel.selectedOptions[0].textContent}.`);
+  });
+  $('#rowsU').addEventListener('click', async (e) => {
+    const a = e.target.closest('[data-action]'); if (!a) return;
+    const u = usuarios.find((x) => String(x.id_usuario) === a.closest('tr').dataset.id);
+    if (a.dataset.action === 'nombre') {
+      formModal({ title: 'Nombre de ' + u.email, okLabel: 'Guardar', fields: [{ name: 'nombre', label: 'Nombre (así firma en ventas y auditoría)', required: true, minLen: 2, max: 80, full: true }],
+        values: { nombre: u.nombre }, onSubmit: async (d) => { await guardar(u, { nombre: d.nombre }, 'Nombre actualizado.'); } });
+    }
+    if (a.dataset.action === 'desactivar') {
+      if (!await confirmar({ title: 'Desactivar usuario', message: `<b>${esc(u.nombre)}</b> ya no podrá ver ni registrar nada en LoteSmart. Su historial se conserva y puedes reactivarlo cuando quieras.`, okLabel: 'Desactivar', danger: true })) return;
+      guardar(u, { activo: false }, `${u.nombre} desactivado.`);
+    }
+    if (a.dataset.action === 'activar') guardar(u, { activo: true }, `${u.nombre} activado.`);
+  });
+  $('#rowsM').addEventListener('change', async (e) => {
+    const cb = e.target.closest('[data-rp]'); if (!cb) return;
+    const [idRol, permiso] = cb.dataset.rp.split('|');
+    cb.disabled = true;
+    try {
+      await db.rpc('rol_permiso_cambiar', conUsuario({ p_id_rol: Number(idRol), p_permiso: permiso, p_conceder: cb.checked }));
+      const r = roles.find((x) => String(x.id_rol) === idRol), p = permisos.find((x) => x.clave === permiso);
+      toast(`${r.nombre}: ${cb.checked ? 'puede' : 'ya no puede'} ${p.descripcion.toLowerCase()}.`);
+      if (auth.perfil && auth.perfil.rol === r.clave) { await cargarPerfil(); pintaNav(); }
+    } catch (err) { cb.checked = !cb.checked; fallo(err); }
+    finally { cb.disabled = false; }
+  });
+  await cargar();
+}
+
+/* =====================================================================
    CONEXIÓN E INICIO DE SESIÓN
    ===================================================================== */
 function modoAuth(on) { document.body.classList.toggle('auth-mode', on); }
@@ -1976,28 +2068,31 @@ function cambiarContrasena() {
 /* Mi cuenta: nombre con el que se firma y cambio de contraseña. */
 function miCuenta() {
   formModal({ title: 'Mi cuenta', okLabel: 'Guardar',
-    notice: '',
     fields: [
       { name: 'nombre', label: 'Nombre (así firmas ventas, mermas y cambios)', required: true, minLen: 3, max: 80, full: true },
       { name: 'email', label: 'Correo', disabled: true, full: true },
       { name: 'p1', label: 'Nueva contraseña (déjala vacía para no cambiarla)', type: 'password', full: true, minLen: 6 },
       { name: 'p2', label: 'Repite la nueva contraseña', type: 'password', full: true }
     ],
-    values: { nombre: (auth.user && auth.user.user_metadata && auth.user.user_metadata.nombre) || '', email: auth.user ? auth.user.email : '' },
+    notice: auth.perfil ? `Tu rol: <b>${esc(auth.perfil.rol_nombre)}</b>. Solo un administrador puede cambiarlo.` : '',
+    values: { nombre: auth.nombre, email: auth.user ? auth.user.email : '' },
     onSubmit: async (d) => {
       if ((d.p1 || d.p2) && d.p1 !== d.p2) throw new ApiError('Las contraseñas no coinciden.');
+      await db.rpc('mi_nombre', { p_nombre: d.nombre });
       const body = { data: { nombre: d.nombre } };
       if (d.p1) body.password = d.p1;
       const res = await fetch(cfg.url.replace(/\/+$/, '') + '/auth/v1/user', { method: 'PUT',
         headers: { apikey: cfg.key, Authorization: 'Bearer ' + auth.session.access_token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       if (!res.ok) throw new ApiError(d.p1 ? 'No se pudo guardar. La contraseña debe tener al menos 6 caracteres y ser distinta a la actual.' : 'No se pudo guardar el nombre.');
       await auth.renovar();          // nuevo token con el nombre actualizado
+      await cargarPerfil();
       pintaPie();
       toast(d.p1 ? 'Nombre y contraseña actualizados.' : 'Nombre actualizado.');
     } });
 }
 
-function entrarApp() {
+async function entrarApp() {
+  try { await cargarPerfil(); } catch (e) { return router(e.message); }
   modoAuth(false);
   pintaPie();
   toast(`Hola, ${auth.nombre}.`);
@@ -2012,7 +2107,7 @@ async function cerrarSesion() {
 }
 function pintaPie() {
   const ini = (auth.nombre || '?').trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
-  $('#btnUser').innerHTML = `<span class="avatar">${esc(ini)}</span><span class="who"><b>${esc(auth.nombre || 'Sin sesión')}</b><small>${esc(auth.user ? auth.user.email : '')}</small></span>`;
+  $('#btnUser').innerHTML = `<span class="avatar">${esc(ini)}</span><span class="who"><b>${esc(auth.nombre || 'Sin sesión')}</b><small>${esc(auth.perfil ? auth.perfil.rol_nombre : (auth.user ? auth.user.email : ''))}</small></span>`;
   $('#btnUser').title = 'Mi cuenta: nombre y contraseña';
   $('#btnLogout').innerHTML = icon('logout').replace('<svg', '<svg width="16" height="16"') + '<span>Cerrar sesión</span>';
 }
@@ -2033,10 +2128,25 @@ const RUTAS = [
   ['Análisis y control'],
   ['reportes', 'Reportes', 'chart', paginaReportes],
   ['trazabilidad', 'Trazabilidad', 'route', paginaTrazabilidad],
-  ['auditoria', 'Auditoría', 'log', paginaAuditoria]
+  ['auditoria', 'Auditoría', 'log', paginaAuditoria, 'auditoria.ver'],
+  ['usuarios', 'Usuarios y permisos', 'users', paginaUsuarios, 'usuarios.administrar']
 ];
-$('#nav').innerHTML = RUTAS.map((r) => r.length === 1 ? `<div class="group">${r[0]}</div>`
-  : `<a href="#${r[0]}" data-ruta="${r[0]}">${icon(r[2]).replace('<svg', '<svg width="18" height="18"')}<span>${r[1]}</span></a>`).join('');
+RUTAS.find((r) => r[0] === 'reportes').push('reportes.ver');
+const rutaVisible = (r) => r.length > 1 && (!r[4] || puede(r[4]));
+function pintaNav() {
+  const html = [];
+  for (let i = 0; i < RUTAS.length; i++) {
+    const r = RUTAS[i];
+    if (r.length === 1) {
+      let j = i + 1, alguna = false;
+      for (; j < RUTAS.length && RUTAS[j].length > 1; j++) if (rutaVisible(RUTAS[j])) alguna = true;
+      if (alguna) html.push(`<div class="group">${r[0]}</div>`);
+    } else if (rutaVisible(r)) {
+      html.push(`<a href="#${r[0]}" data-ruta="${r[0]}">${icon(r[2]).replace('<svg', '<svg width="18" height="18"')}<span>${r[1]}</span></a>`);
+    }
+  }
+  $('#nav').innerHTML = html.join('');
+}
 
 async function router(mensaje) {
   document.body.classList.remove('menu-open');
@@ -2044,9 +2154,15 @@ async function router(mensaje) {
   tip.hidden = true;
   if (!cfg.url || !cfg.key) return paginaConexion();
   if (!auth.session) return paginaLogin(typeof mensaje === 'string' ? mensaje : '');
+  if (!auth.perfil) {
+    try { await cargarPerfil(); }
+    catch (e) { if (!auth.session) return paginaLogin(e.message); fallo(e); return; }
+  }
   modoAuth(false);
+  pintaNav(); pintaPie();
   const nombre = (location.hash || '#tablero').slice(1);
-  const r = RUTAS.find((x) => x[0] === nombre && x.length > 1) || RUTAS[1];
+  let r = RUTAS.find((x) => x[0] === nombre && x.length > 1) || RUTAS[1];
+  if (!rutaVisible(r)) { toast(`Tu rol no tiene acceso a ${r[1]}.`, true); r = RUTAS[1]; history.replaceState(null, '', '#tablero'); }
   $$('#nav a').forEach((a) => { if (a.dataset.ruta === r[0]) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
   document.title = r[1] + ' · LoteSmart';
   window.scrollTo(0, 0);

@@ -14,6 +14,7 @@
 --   5. Vistas (cálculos derivados)
 --   6. Funciones RPC (altas, bajas, modificaciones, ventas FEFO...)
 --   7. Reporteador (funciones de reportes)
+--   7b. Usuarios, roles y permisos
 --   8. Seguridad e inicio de sesión (Supabase Auth + RLS)
 --   9. Datos de prueba (los del guion de demostración)
 -- =====================================================================
@@ -23,7 +24,8 @@
 -- =====================================================================
 drop view  if exists v_tablero, v_trazabilidad, v_movimiento_detalle, v_venta_resumen,
                      v_lote_detalle, v_producto, v_proveedor, v_cliente, v_auditoria cascade;
-drop table if exists auditoria, movimiento, venta, lote, producto, cliente, proveedor, unidad_medida cascade;
+drop table if exists auditoria, movimiento, venta, lote, producto, cliente, proveedor, unidad_medida,
+                     usuario, rol_permiso, permiso, rol cascade;
 drop type  if exists estado_lote, estado_venta, tipo_movimiento cascade;
 drop function if exists
   fn_hoy, fn_usuario, fn_set_usuario, fn_interno, fn_estado_lote, fn_folio,
@@ -38,7 +40,9 @@ drop function if exists
   registrar_merma, registrar_ajuste,
   simular_fefo, venta_registrar, venta_cancelar, marcar_caducados,
   rpt_ventas, rpt_ventas_dia, rpt_ventas_producto, rpt_ventas_cliente, rpt_inventario,
-  rpt_por_caducar, rpt_mermas_ajustes, rpt_entradas_proveedor, rpt_kardex cascade;
+  rpt_por_caducar, rpt_mermas_ajustes, rpt_entradas_proveedor, rpt_kardex,
+  fn_uid, fn_activo, fn_tiene_permiso, fn_exigir, mi_perfil, mi_nombre, usuario_actualizar, rol_permiso_cambiar,
+  fn_perfil_desde_auth cascade;
 
 -- =====================================================================
 -- 1. TIPOS Y UTILIDADES
@@ -51,16 +55,24 @@ create type tipo_movimiento as enum ('VENTA','MERMA','AJUSTE_NEGATIVO','AJUSTE_P
 create function fn_hoy() returns date language sql stable as
 $$ select (now() at time zone 'America/Mexico_City')::date $$;
 
--- Usuario que firma movimientos y auditoría (equivale a @usuario_app).
--- Con inicio de sesión se toma del token de Supabase Auth (nombre o correo),
--- así nadie puede firmar con el nombre de otro.
-create function fn_usuario() returns text language sql stable as $$
-  select left(coalesce(
-    nullif(nullif(current_setting('request.jwt.claims', true), '')::jsonb -> 'user_metadata' ->> 'nombre', ''),
-    nullif(nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'email', ''),
-    nullif(current_setting('app.usuario', true), ''),
-    current_user::text), 120)
+-- Usuario de Supabase Auth que hace la petición (null desde el SQL Editor).
+create function fn_uid() returns uuid language sql stable as $$
+  select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
+                  nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')::uuid
 $$;
+
+-- Nombre que firma movimientos y auditoría (equivale a @usuario_app).
+-- Se toma del perfil del usuario con sesión (tabla usuario); así nadie
+-- puede firmar con el nombre de otro.
+create function fn_usuario() returns text language plpgsql stable security definer set search_path = public as $$
+declare v text; c jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
+begin
+  if fn_uid() is not null and to_regclass('public.usuario') is not null then
+    execute 'select nombre from usuario where auth_id = $1' into v using fn_uid();
+  end if;
+  return left(coalesce(v, nullif(c -> 'user_metadata' ->> 'nombre', ''), nullif(c ->> 'email', ''),
+                       nullif(current_setting('app.usuario', true), ''), session_user::text), 120);
+end $$;
 
 create function fn_set_usuario(p_usuario text) returns void language sql as
 $$ select set_config('app.usuario', coalesce(nullif(trim(p_usuario), ''), 'web'), true) $$;
@@ -212,6 +224,109 @@ create table auditoria (
                                              'CAMBIO_ESTADO','CANCELACION','ELIMINACION'))
 );
 create index ix_aud_tabla on auditoria (tabla, id_registro);
+
+-- ---------- Roles y permisos (control de acceso por rol) ----------
+create table rol (
+  id_rol      smallint generated always as identity primary key,
+  clave       varchar(20)  not null,
+  nombre      varchar(40)  not null,
+  descripcion varchar(200),
+  constraint uq_rol_clave unique (clave),
+  constraint ck_rol_clave check (clave = upper(clave))
+);
+
+create table permiso (
+  clave       varchar(40)  primary key,
+  descripcion varchar(120) not null,
+  orden       smallint     not null default 0
+);
+
+create table rol_permiso (
+  id_rol   smallint    not null references rol(id_rol) on delete cascade,
+  permiso  varchar(40) not null references permiso(clave) on delete cascade,
+  primary key (id_rol, permiso)
+);
+
+-- Perfil de cada cuenta de Supabase Auth dentro de LoteSmart.
+create table usuario (
+  id_usuario int generated always as identity primary key,
+  auth_id    uuid         not null,
+  email      varchar(160) not null,
+  nombre     varchar(80)  not null,
+  id_rol     smallint     not null references rol(id_rol) on delete restrict,
+  activo     boolean      not null default true,
+  creado_en  timestamptz  not null default now(),
+  constraint uq_usuario_auth unique (auth_id),
+  constraint ck_usuario_nombre check (char_length(trim(nombre)) >= 2)
+);
+create index ix_usuario_rol on usuario (id_rol);
+
+insert into rol (clave, nombre, descripcion) values
+  ('ADMIN',    'Administrador', 'Todo, incluida la administración de usuarios y permisos.'),
+  ('ALMACEN',  'Almacén',       'Productos, proveedores, entradas de lotes, mermas y ajustes.'),
+  ('VENDEDOR', 'Vendedor',      'Registra ventas con FEFO y da de alta clientes.'),
+  ('CONSULTA', 'Consulta',      'Solo puede ver la información y los reportes.');
+
+insert into permiso (clave, descripcion, orden) values
+  ('catalogo.editar',       'Dar de alta, modificar y dar de baja productos y proveedores', 1),
+  ('clientes.editar',       'Dar de alta, modificar y dar de baja clientes', 2),
+  ('lotes.editar',          'Registrar entradas de lotes, corregirlos y bloquearlos', 3),
+  ('inventario.ajustar',    'Registrar mermas y ajustes de inventario', 4),
+  ('ventas.registrar',      'Registrar ventas', 5),
+  ('ventas.cancelar',       'Cancelar ventas', 6),
+  ('registros.eliminar',    'Eliminar registros de forma definitiva', 7),
+  ('reportes.ver',          'Ver y exportar reportes', 8),
+  ('auditoria.ver',         'Ver la auditoría', 9),
+  ('usuarios.administrar',  'Administrar usuarios, roles y permisos', 10);
+
+insert into rol_permiso (id_rol, permiso)
+select r.id_rol, p.clave from rol r cross join permiso p
+ where r.clave = 'ADMIN'
+    or (r.clave = 'ALMACEN'  and p.clave in ('catalogo.editar', 'lotes.editar', 'inventario.ajustar', 'reportes.ver'))
+    or (r.clave = 'VENDEDOR' and p.clave in ('clientes.editar', 'ventas.registrar', 'reportes.ver'))
+    or (r.clave = 'CONSULTA' and p.clave in ('reportes.ver'));
+
+-- ¿El usuario con sesión tiene perfil activo? (sin sesión de Auth = administrador de BD)
+create function fn_activo() returns boolean language plpgsql stable security definer set search_path = public as $$
+begin
+  if fn_uid() is null then
+    return coalesce(current_setting('role', true), 'none') not in ('anon', 'authenticated');
+  end if;
+  return exists (select 1 from usuario where auth_id = fn_uid() and activo);
+end $$;
+
+create function fn_tiene_permiso(p_permiso text) returns boolean language plpgsql stable security definer set search_path = public as $$
+begin
+  if fn_uid() is null then
+    return coalesce(current_setting('role', true), 'none') not in ('anon', 'authenticated');
+  end if;
+  return exists (select 1 from usuario u join rol_permiso rp on rp.id_rol = u.id_rol
+                  where u.auth_id = fn_uid() and u.activo and rp.permiso = p_permiso);
+end $$;
+
+-- Detiene la operación si el usuario no tiene el permiso (null = basta con estar activo).
+create function fn_exigir(p_permiso text) returns void language plpgsql stable security definer set search_path = public as $$
+declare v_activo boolean; v_rol text; v_desc text;
+begin
+  if fn_uid() is null then
+    if coalesce(current_setting('role', true), 'none') in ('anon', 'authenticated') then
+      raise exception 'Inicia sesión para continuar.' using errcode = 'P0001';
+    end if;
+    return;   -- SQL Editor / instalación
+  end if;
+  select u.activo, r.nombre into v_activo, v_rol from usuario u join rol r on r.id_rol = u.id_rol where u.auth_id = fn_uid();
+  if not found then
+    raise exception 'Tu cuenta aún no tiene perfil en LoteSmart. Cierra sesión y vuelve a entrar.' using errcode = 'P0001';
+  end if;
+  if not v_activo then
+    raise exception 'Tu usuario está desactivado. Habla con un administrador.' using errcode = 'P0001';
+  end if;
+  if p_permiso is not null and not exists (
+       select 1 from usuario u join rol_permiso rp on rp.id_rol = u.id_rol where u.auth_id = fn_uid() and rp.permiso = p_permiso) then
+    select descripcion into v_desc from permiso where clave = p_permiso;
+    raise exception 'Tu rol (%) no tiene permiso para: %.', v_rol, lower(coalesce(v_desc, p_permiso)) using errcode = 'P0001';
+  end if;
+end $$;
 
 -- =====================================================================
 -- 3. TRIGGERS DE REGLAS DE NEGOCIO
@@ -450,6 +565,7 @@ create trigger trg_aud_proveedor after insert or update or delete on proveedor f
 create trigger trg_aud_cliente   after insert or update or delete on cliente   for each row execute function trg_auditar('id_cliente');
 create trigger trg_aud_lote      after insert or update or delete on lote      for each row execute function trg_auditar('id_lote');
 create trigger trg_aud_venta     after insert or update or delete on venta     for each row execute function trg_auditar('id_venta');
+create trigger trg_aud_usuario   after insert or update or delete on usuario   for each row execute function trg_auditar('id_usuario');
 
 -- =====================================================================
 -- 5. VISTAS (cálculos derivados del documento, sección 9)
@@ -561,7 +677,7 @@ create function unidad_guardar(p_clave text, p_nombre text, p_usuario text defau
 returns smallint language plpgsql security definer set search_path = public as $$
 declare v_id smallint;
 begin
-  perform fn_set_usuario(p_usuario);
+  perform fn_set_usuario(p_usuario); perform fn_exigir('catalogo.editar');
   insert into unidad_medida (clave, nombre) values (upper(trim(p_clave)), trim(p_nombre)) returning id_unidad into v_id;
   return v_id;
 end $$;
@@ -571,7 +687,7 @@ create function producto_guardar(p_id int, p_sku text, p_nombre text, p_id_unida
 returns int language plpgsql security definer set search_path = public as $$
 declare v_id int;
 begin
-  perform fn_set_usuario(p_usuario);
+  perform fn_set_usuario(p_usuario); perform fn_exigir('catalogo.editar');
   if p_id is null then
     insert into producto (sku, nombre, id_unidad, precio_venta, stock_minimo, dias_minimos_venta)
     values (p_sku, p_nombre, p_id_unidad, p_precio_venta, coalesce(p_stock_minimo, 0), coalesce(p_dias_minimos_venta, 0))
@@ -589,7 +705,7 @@ end $$;
 create function producto_imagen(p_id int, p_imagen_path text, p_usuario text default null) returns void
 language plpgsql security definer set search_path = public as $$
 begin
-  perform fn_set_usuario(p_usuario);
+  perform fn_set_usuario(p_usuario); perform fn_exigir('catalogo.editar');
   if p_imagen_path is not null and p_imagen_path !~ '^[A-Za-z0-9._/-]{3,200}$' then
     raise exception 'Nombre de archivo de imagen no válido.' using errcode = 'P0001';
   end if;
@@ -599,21 +715,21 @@ end $$;
 
 create function producto_baja(p_id int, p_usuario text default null) returns void
 language plpgsql security definer set search_path = public as $$
-begin perform fn_set_usuario(p_usuario); update producto set activo = false where id_producto = p_id; end $$;
+begin perform fn_set_usuario(p_usuario); perform fn_exigir('catalogo.editar'); update producto set activo = false where id_producto = p_id; end $$;
 
 create function producto_reactivar(p_id int, p_usuario text default null) returns void
 language plpgsql security definer set search_path = public as $$
-begin perform fn_set_usuario(p_usuario); update producto set activo = true where id_producto = p_id; end $$;
+begin perform fn_set_usuario(p_usuario); perform fn_exigir('catalogo.editar'); update producto set activo = true where id_producto = p_id; end $$;
 
 create function producto_eliminar(p_id int, p_usuario text default null) returns void
 language plpgsql security definer set search_path = public as $$
-begin perform fn_set_usuario(p_usuario); delete from producto where id_producto = p_id; end $$;
+begin perform fn_set_usuario(p_usuario); perform fn_exigir('registros.eliminar'); delete from producto where id_producto = p_id; end $$;
 
 create function proveedor_guardar(p_id int, p_rfc text, p_nombre text, p_telefono text, p_usuario text default null)
 returns int language plpgsql security definer set search_path = public as $$
 declare v_id int;
 begin
-  perform fn_set_usuario(p_usuario);
+  perform fn_set_usuario(p_usuario); perform fn_exigir('catalogo.editar');
   if p_id is null then
     insert into proveedor (rfc, nombre, telefono) values (p_rfc, p_nombre, p_telefono) returning id_proveedor into v_id;
   else
@@ -626,21 +742,21 @@ end $$;
 
 create function proveedor_baja(p_id int, p_usuario text default null) returns void
 language plpgsql security definer set search_path = public as $$
-begin perform fn_set_usuario(p_usuario); update proveedor set activo = false where id_proveedor = p_id; end $$;
+begin perform fn_set_usuario(p_usuario); perform fn_exigir('catalogo.editar'); update proveedor set activo = false where id_proveedor = p_id; end $$;
 
 create function proveedor_reactivar(p_id int, p_usuario text default null) returns void
 language plpgsql security definer set search_path = public as $$
-begin perform fn_set_usuario(p_usuario); update proveedor set activo = true where id_proveedor = p_id; end $$;
+begin perform fn_set_usuario(p_usuario); perform fn_exigir('catalogo.editar'); update proveedor set activo = true where id_proveedor = p_id; end $$;
 
 create function proveedor_eliminar(p_id int, p_usuario text default null) returns void
 language plpgsql security definer set search_path = public as $$
-begin perform fn_set_usuario(p_usuario); delete from proveedor where id_proveedor = p_id; end $$;
+begin perform fn_set_usuario(p_usuario); perform fn_exigir('registros.eliminar'); delete from proveedor where id_proveedor = p_id; end $$;
 
 create function cliente_guardar(p_id int, p_nombre text, p_rfc text, p_telefono text, p_correo text, p_usuario text default null)
 returns int language plpgsql security definer set search_path = public as $$
 declare v_id int;
 begin
-  perform fn_set_usuario(p_usuario);
+  perform fn_set_usuario(p_usuario); perform fn_exigir('clientes.editar');
   if p_id is null then
     insert into cliente (nombre, rfc, telefono, correo) values (p_nombre, p_rfc, p_telefono, p_correo) returning id_cliente into v_id;
   else
@@ -653,15 +769,15 @@ end $$;
 
 create function cliente_baja(p_id int, p_usuario text default null) returns void
 language plpgsql security definer set search_path = public as $$
-begin perform fn_set_usuario(p_usuario); update cliente set activo = false where id_cliente = p_id; end $$;
+begin perform fn_set_usuario(p_usuario); perform fn_exigir('clientes.editar'); update cliente set activo = false where id_cliente = p_id; end $$;
 
 create function cliente_reactivar(p_id int, p_usuario text default null) returns void
 language plpgsql security definer set search_path = public as $$
-begin perform fn_set_usuario(p_usuario); update cliente set activo = true where id_cliente = p_id; end $$;
+begin perform fn_set_usuario(p_usuario); perform fn_exigir('clientes.editar'); update cliente set activo = true where id_cliente = p_id; end $$;
 
 create function cliente_eliminar(p_id int, p_usuario text default null) returns void
 language plpgsql security definer set search_path = public as $$
-begin perform fn_set_usuario(p_usuario); delete from cliente where id_cliente = p_id; end $$;
+begin perform fn_set_usuario(p_usuario); perform fn_exigir('registros.eliminar'); delete from cliente where id_cliente = p_id; end $$;
 
 -- ---------- Lotes ----------
 create function lote_alta(p_id_producto int, p_id_proveedor int, p_codigo_lote text, p_fecha_caducidad date,
@@ -669,7 +785,7 @@ create function lote_alta(p_id_producto int, p_id_proveedor int, p_codigo_lote t
 returns int language plpgsql security definer set search_path = public as $$
 declare v_id int;
 begin
-  perform fn_set_usuario(p_usuario);
+  perform fn_set_usuario(p_usuario); perform fn_exigir('lotes.editar');
   insert into lote (id_producto, id_proveedor, codigo_lote, fecha_caducidad, cantidad_inicial, cantidad_disponible, costo_unitario)
   values (p_id_producto, p_id_proveedor, p_codigo_lote, p_fecha_caducidad, p_cantidad, p_cantidad, p_costo_unitario)
   returning id_lote into v_id;
@@ -680,7 +796,7 @@ create function lote_modificar(p_id int, p_id_producto int, p_id_proveedor int, 
   p_fecha_caducidad date, p_cantidad int, p_costo_unitario numeric, p_usuario text default null)
 returns void language plpgsql security definer set search_path = public as $$
 begin
-  perform fn_set_usuario(p_usuario);
+  perform fn_set_usuario(p_usuario); perform fn_exigir('lotes.editar');
   update lote set id_producto = p_id_producto, id_proveedor = p_id_proveedor, codigo_lote = p_codigo_lote,
          fecha_caducidad = p_fecha_caducidad, cantidad_inicial = p_cantidad, costo_unitario = p_costo_unitario
    where id_lote = p_id;
@@ -690,7 +806,7 @@ end $$;
 create function lote_bloquear(p_id int, p_motivo text, p_usuario text default null) returns void
 language plpgsql security definer set search_path = public as $$
 begin
-  perform fn_set_usuario(p_usuario);
+  perform fn_set_usuario(p_usuario); perform fn_exigir('lotes.editar');
   if nullif(trim(p_motivo), '') is null then
     raise exception 'Escriba el motivo del bloqueo.' using errcode = 'P0001';
   end if;
@@ -705,7 +821,7 @@ end $$;
 create function lote_desbloquear(p_id int, p_usuario text default null) returns void
 language plpgsql security definer set search_path = public as $$
 begin
-  perform fn_set_usuario(p_usuario);
+  perform fn_set_usuario(p_usuario); perform fn_exigir('lotes.editar');
   if not exists (select 1 from lote where id_lote = p_id and estado = 'BLOQUEADO') then
     raise exception 'El lote no está bloqueado.' using errcode = 'P0001';
   end if;
@@ -717,13 +833,13 @@ end $$;
 
 create function lote_eliminar(p_id int, p_usuario text default null) returns void
 language plpgsql security definer set search_path = public as $$
-begin perform fn_set_usuario(p_usuario); delete from lote where id_lote = p_id; end $$;
+begin perform fn_set_usuario(p_usuario); perform fn_exigir('registros.eliminar'); delete from lote where id_lote = p_id; end $$;
 
 create function registrar_merma(p_id_lote int, p_cantidad int, p_motivo text, p_usuario text default null)
 returns bigint language plpgsql security definer set search_path = public as $$
 declare v_id bigint;
 begin
-  perform fn_set_usuario(p_usuario);
+  perform fn_set_usuario(p_usuario); perform fn_exigir('inventario.ajustar');
   perform 1 from lote where id_lote = p_id_lote for update;
   insert into movimiento (id_lote, tipo, cantidad, motivo) values (p_id_lote, 'MERMA', p_cantidad, p_motivo)
   returning id_movimiento into v_id;
@@ -734,7 +850,7 @@ create function registrar_ajuste(p_id_lote int, p_positivo boolean, p_cantidad i
 returns bigint language plpgsql security definer set search_path = public as $$
 declare v_id bigint;
 begin
-  perform fn_set_usuario(p_usuario);
+  perform fn_set_usuario(p_usuario); perform fn_exigir('inventario.ajustar');
   perform 1 from lote where id_lote = p_id_lote for update;
   insert into movimiento (id_lote, tipo, cantidad, motivo)
   values (p_id_lote, case when p_positivo then 'AJUSTE_POSITIVO' else 'AJUSTE_NEGATIVO' end::tipo_movimiento, p_cantidad, p_motivo)
@@ -786,6 +902,7 @@ create function simular_fefo(p_lineas jsonb) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare v_res jsonb := '[]'::jsonb; ln record; v_asig jsonb; v_prod record;
 begin
+  perform fn_exigir('ventas.registrar');
   for ln in select (e->>'id_producto')::int as id_producto, sum((e->>'cantidad')::int)::int as cantidad
               from jsonb_array_elements(coalesce(p_lineas, '[]'::jsonb)) e group by 1 loop
     select nombre, precio_venta into v_prod from producto where id_producto = ln.id_producto;
@@ -807,7 +924,7 @@ create function venta_registrar(p_id_cliente int, p_lineas jsonb, p_usuario text
 returns bigint language plpgsql security definer set search_path = public as $$
 declare v_id bigint; ln record; a record; v_precio numeric;
 begin
-  perform fn_set_usuario(p_usuario);
+  perform fn_set_usuario(p_usuario); perform fn_exigir('ventas.registrar');
   if not exists (select 1 from cliente where id_cliente = p_id_cliente and activo) then
     raise exception 'Seleccione un cliente activo.' using errcode = 'P0001';
   end if;
@@ -833,7 +950,7 @@ create function venta_cancelar(p_id_venta bigint, p_motivo text, p_usuario text 
 returns void language plpgsql security definer set search_path = public as $$
 declare m record;
 begin
-  perform fn_set_usuario(p_usuario);
+  perform fn_set_usuario(p_usuario); perform fn_exigir('ventas.cancelar');
   perform 1 from venta where id_venta = p_id_venta for update;
   if not found then raise exception 'La venta no existe.' using errcode = 'P0001'; end if;
   update venta set estado = 'CANCELADA', motivo_cancelacion = p_motivo where id_venta = p_id_venta;
@@ -849,6 +966,7 @@ create function marcar_caducados() returns int
 language plpgsql security definer set search_path = public as $$
 declare v_n int;
 begin
+  perform fn_exigir(null);
   perform fn_set_usuario('sistema');
   perform set_config('lotesmart.interno', '1', true);
   update lote set estado = 'CADUCADO'
@@ -869,6 +987,7 @@ create function rpt_ventas(p_desde date, p_hasta date, p_incluir_canceladas bool
 returns table (folio text, fecha timestamptz, cliente text, estado text, unidades bigint,
                total numeric, costo numeric, margen numeric, usuario text)
 language sql stable as $$
+  select fn_exigir('reportes.ver');
   select v.folio, v.fecha, v.cliente, v.estado::text, v.unidades, v.total,
          (v.total - v.margen_bruto)::numeric(12,2), v.margen_bruto, v.usuario
     from v_venta_resumen v
@@ -881,6 +1000,7 @@ $$;
 create function rpt_ventas_dia(p_desde date, p_hasta date)
 returns table (dia date, ventas bigint, importe numeric, margen numeric)
 language sql stable as $$
+  select fn_exigir('reportes.ver');
   select d::date, count(v.id_venta), coalesce(sum(v.total), 0)::numeric(12,2), coalesce(sum(v.margen_bruto), 0)::numeric(12,2)
     from generate_series(p_desde, p_hasta, interval '1 day') d
     left join v_venta_resumen v
@@ -893,6 +1013,7 @@ create function rpt_ventas_producto(p_desde date, p_hasta date)
 returns table (sku text, producto text, unidad text, ventas bigint, unidades bigint,
                importe numeric, costo numeric, margen numeric, margen_pct numeric)
 language sql stable as $$
+  select fn_exigir('reportes.ver');
   select p.sku, p.nombre, u.clave, count(distinct v.id_venta), sum(m.cantidad),
          sum(m.cantidad * m.precio_unitario)::numeric(12,2),
          sum(m.cantidad * l.costo_unitario)::numeric(12,2),
@@ -912,6 +1033,7 @@ $$;
 create function rpt_ventas_cliente(p_desde date, p_hasta date)
 returns table (cliente text, rfc text, ventas bigint, unidades numeric, importe numeric, margen numeric, ultima_compra timestamptz)
 language sql stable as $$
+  select fn_exigir('reportes.ver');
   select c.nombre, c.rfc, count(v.id_venta), sum(v.unidades)::numeric, sum(v.total)::numeric(12,2),
          sum(v.margen_bruto)::numeric(12,2), max(v.fecha)
     from v_venta_resumen v
@@ -927,6 +1049,7 @@ returns table (sku text, producto text, unidad text, activo boolean, lotes bigin
                stock_no_vendible bigint, valor_vigente numeric, valor_en_riesgo numeric, valor_no_vendible numeric,
                stock_minimo int, alerta_reorden boolean)
 language sql stable as $$
+  select fn_exigir('reportes.ver');
   select p.sku, p.nombre, p.unidad, p.activo,
          count(l.id_lote) filter (where l.cantidad_disponible > 0),
          p.stock_vigente, p.stock_vendible,
@@ -946,6 +1069,7 @@ create function rpt_por_caducar(p_dias int)
 returns table (codigo_lote text, producto text, proveedor text, fecha_caducidad date, dias_restantes int,
                existencia int, unidad text, costo_unitario numeric, valor numeric, estado text)
 language sql stable as $$
+  select fn_exigir('reportes.ver');
   select l.codigo_lote, l.producto, l.proveedor, l.fecha_caducidad, l.dias_restantes, l.cantidad_disponible,
          l.unidad, l.costo_unitario, l.valor_existencia, l.semaforo
     from v_lote_detalle l
@@ -957,6 +1081,7 @@ $$;
 create function rpt_mermas_ajustes(p_desde date, p_hasta date)
 returns table (fecha timestamptz, tipo text, codigo_lote text, producto text, cantidad int, valor_costo numeric, motivo text, usuario text)
 language sql stable as $$
+  select fn_exigir('reportes.ver');
   select m.fecha, m.tipo::text, l.codigo_lote, p.nombre,
          case when m.tipo = 'AJUSTE_POSITIVO' then m.cantidad else -m.cantidad end,
          (case when m.tipo = 'AJUSTE_POSITIVO' then 1 else -1 end * m.cantidad * l.costo_unitario)::numeric(12,2),
@@ -973,6 +1098,7 @@ $$;
 create function rpt_entradas_proveedor(p_desde date, p_hasta date)
 returns table (proveedor text, rfc text, lotes bigint, unidades bigint, costo_total numeric, productos text)
 language sql stable as $$
+  select fn_exigir('reportes.ver');
   select pr.nombre, pr.rfc, count(l.id_lote), sum(l.cantidad_inicial),
          sum(l.cantidad_inicial * l.costo_unitario)::numeric(12,2),
          string_agg(distinct p.nombre, ', ')
@@ -989,6 +1115,7 @@ create function rpt_kardex(p_desde date, p_hasta date, p_id_producto int default
 returns table (fecha timestamptz, producto text, codigo_lote text, concepto text, referencia text,
                entrada int, salida int, saldo bigint, usuario text)
 language sql stable as $$
+  select fn_exigir('reportes.ver');
   with mov as (
     select l.fecha_entrada as fecha, l.id_producto, l.codigo_lote, 'ENTRADA'::text as concepto,
            pr.nombre::text as referencia, l.cantidad_inicial as entrada, 0 as salida, null::text as usuario, l.id_lote::bigint - 1000000000000 as orden
@@ -1014,6 +1141,71 @@ language sql stable as $$
 $$;
 
 -- =====================================================================
+-- 7b. USUARIOS Y PERMISOS
+-- =====================================================================
+
+-- Perfil del usuario con sesión. Si es su primera vez, lo crea: el primer
+-- usuario de la instalación queda como Administrador; los demás como Consulta.
+create function mi_perfil() returns jsonb language plpgsql security definer set search_path = public as $$
+declare c jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb; v usuario%rowtype; r rol%rowtype;
+begin
+  if fn_uid() is null then raise exception 'Inicia sesión para continuar.' using errcode = 'P0001'; end if;
+  select * into v from usuario where auth_id = fn_uid();
+  if not found then
+    insert into usuario (auth_id, email, nombre, id_rol)
+    values (fn_uid(), coalesce(c ->> 'email', 'sin-correo'),
+            coalesce(nullif(trim(c -> 'user_metadata' ->> 'nombre'), ''), split_part(coalesce(c ->> 'email', 'usuario'), '@', 1)),
+            (select id_rol from rol where clave = case when exists (
+               select 1 from usuario u join rol_permiso rp on rp.id_rol = u.id_rol where u.activo and rp.permiso = 'usuarios.administrar')
+             then 'CONSULTA' else 'ADMIN' end))
+    on conflict (auth_id) do nothing;
+    select * into v from usuario where auth_id = fn_uid();
+  end if;
+  select * into r from rol where id_rol = v.id_rol;
+  return jsonb_build_object('id_usuario', v.id_usuario, 'nombre', v.nombre, 'email', v.email, 'activo', v.activo,
+    'rol', r.clave, 'rol_nombre', r.nombre,
+    'permisos', (select coalesce(jsonb_agg(permiso order by permiso), '[]'::jsonb) from rol_permiso where id_rol = v.id_rol));
+end $$;
+
+-- Cada quien puede cambiar su propio nombre de firma.
+create function mi_nombre(p_nombre text) returns void language plpgsql security definer set search_path = public as $$
+begin
+  perform fn_exigir(null);
+  update usuario set nombre = trim(p_nombre) where auth_id = fn_uid();
+end $$;
+
+create function usuario_actualizar(p_id_usuario int, p_nombre text, p_id_rol int, p_activo boolean, p_usuario text default null)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  perform fn_set_usuario(p_usuario); perform fn_exigir('usuarios.administrar');
+  update usuario set nombre = trim(p_nombre), id_rol = p_id_rol, activo = p_activo where id_usuario = p_id_usuario;
+  if not found then raise exception 'El usuario no existe.' using errcode = 'P0001'; end if;
+  if not exists (select 1 from usuario u join rol_permiso rp on rp.id_rol = u.id_rol
+                  where u.activo and rp.permiso = 'usuarios.administrar') then
+    raise exception 'Debe quedar al menos un administrador activo.' using errcode = 'P0001';
+  end if;
+end $$;
+
+create function rol_permiso_cambiar(p_id_rol int, p_permiso text, p_conceder boolean, p_usuario text default null)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_rol text;
+begin
+  perform fn_set_usuario(p_usuario); perform fn_exigir('usuarios.administrar');
+  select clave into v_rol from rol where id_rol = p_id_rol;
+  if v_rol is null then raise exception 'El rol no existe.' using errcode = 'P0001'; end if;
+  if v_rol = 'ADMIN' and p_permiso = 'usuarios.administrar' and not p_conceder then
+    raise exception 'El rol Administrador siempre conserva la administración de usuarios.' using errcode = 'P0001';
+  end if;
+  if p_conceder then
+    insert into rol_permiso (id_rol, permiso) values (p_id_rol, p_permiso) on conflict do nothing;
+  else
+    delete from rol_permiso where id_rol = p_id_rol and permiso = p_permiso;
+  end if;
+  insert into auditoria (tabla, id_registro, accion, detalle)
+  values ('rol_permiso', p_id_rol, 'MODIFICACION', 'rol: ' || v_rol || '; permiso: ' || p_permiso || '; ' || case when p_conceder then 'concedido' else 'retirado' end);
+end $$;
+
+-- =====================================================================
 -- 8. SEGURIDAD E INICIO DE SESIÓN
 --  · Solo usuarios con sesión iniciada (rol "authenticated" de Supabase Auth)
 --    pueden ver o modificar datos. El rol "anon" (sin sesión) no ve nada.
@@ -1035,21 +1227,32 @@ alter table lote          enable row level security;
 alter table venta         enable row level security;
 alter table movimiento    enable row level security;
 alter table auditoria     enable row level security;
+alter table rol           enable row level security;
+alter table permiso       enable row level security;
+alter table rol_permiso   enable row level security;
+alter table usuario       enable row level security;
 
-create policy lectura on unidad_medida for select to authenticated using (true);
-create policy lectura on proveedor     for select to authenticated using (true);
-create policy lectura on cliente       for select to authenticated using (true);
-create policy lectura on producto      for select to authenticated using (true);
-create policy lectura on lote          for select to authenticated using (true);
-create policy lectura on venta         for select to authenticated using (true);
-create policy lectura on movimiento    for select to authenticated using (true);
-create policy lectura on auditoria     for select to authenticated using (true);
+-- Leer: cualquier usuario con perfil ACTIVO. Un usuario desactivado no ve nada.
+create policy lectura on unidad_medida for select to authenticated using (fn_activo());
+create policy lectura on proveedor     for select to authenticated using (fn_activo());
+create policy lectura on cliente       for select to authenticated using (fn_activo());
+create policy lectura on producto      for select to authenticated using (fn_activo());
+create policy lectura on lote          for select to authenticated using (fn_activo());
+create policy lectura on venta         for select to authenticated using (fn_activo());
+create policy lectura on movimiento    for select to authenticated using (fn_activo());
+create policy lectura on rol           for select to authenticated using (fn_activo());
+create policy lectura on permiso       for select to authenticated using (fn_activo());
+create policy lectura on rol_permiso   for select to authenticated using (fn_activo());
+-- La auditoría solo la ve quien tiene ese permiso.
+create policy lectura on auditoria     for select to authenticated using (fn_tiene_permiso('auditoria.ver'));
+-- Cada quien ve su perfil; el administrador ve a todos.
+create policy lectura on usuario       for select to authenticated using (auth_id = fn_uid() or fn_tiene_permiso('usuarios.administrar'));
 
 grant usage on schema public to anon, authenticated;
-revoke all on unidad_medida, proveedor, cliente, producto, lote, venta, movimiento, auditoria from anon, authenticated;
+revoke all on unidad_medida, proveedor, cliente, producto, lote, venta, movimiento, auditoria, rol, permiso, rol_permiso, usuario from anon, authenticated;
 revoke all on v_lote_detalle, v_producto, v_proveedor, v_cliente, v_venta_resumen,
               v_movimiento_detalle, v_trazabilidad, v_tablero, v_auditoria from anon, authenticated;
-grant select on unidad_medida, proveedor, cliente, producto, lote, venta, movimiento, auditoria to authenticated;
+grant select on unidad_medida, proveedor, cliente, producto, lote, venta, movimiento, auditoria, rol, permiso, rol_permiso, usuario to authenticated;
 grant select on v_lote_detalle, v_producto, v_proveedor, v_cliente, v_venta_resumen,
                 v_movimiento_detalle, v_trazabilidad, v_tablero, v_auditoria to authenticated;
 
@@ -1078,7 +1281,9 @@ begin
     'marcar_caducados()',
     'rpt_ventas(date, date, boolean)', 'rpt_ventas_dia(date, date)', 'rpt_ventas_producto(date, date)',
     'rpt_ventas_cliente(date, date)', 'rpt_inventario()', 'rpt_por_caducar(int)',
-    'rpt_mermas_ajustes(date, date)', 'rpt_entradas_proveedor(date, date)', 'rpt_kardex(date, date, int)'
+    'rpt_mermas_ajustes(date, date)', 'rpt_entradas_proveedor(date, date)', 'rpt_kardex(date, date, int)',
+    'fn_uid()', 'fn_activo()', 'fn_tiene_permiso(text)', 'fn_exigir(text)',
+    'mi_perfil()', 'mi_nombre(text)', 'usuario_actualizar(int, text, int, boolean, text)', 'rol_permiso_cambiar(int, text, boolean, text)'
   ] loop
     execute format('revoke execute on function %s from public, anon', f);
     execute format('grant execute on function %s to authenticated', f);
@@ -1108,6 +1313,44 @@ begin
   execute $p$create policy "lotesmart fotos subir" on storage.objects for insert to authenticated with check (bucket_id = 'productos')$p$;
   execute $p$create policy "lotesmart fotos cambiar" on storage.objects for update to authenticated using (bucket_id = 'productos') with check (bucket_id = 'productos')$p$;
   execute $p$create policy "lotesmart fotos borrar" on storage.objects for delete to authenticated using (bucket_id = 'productos')$p$;
+end $$;
+
+-- =====================================================================
+-- Perfiles automáticos: cada cuenta nueva de Supabase Auth recibe su perfil
+-- (rol Consulta; la primera cuenta de la instalación queda como Administrador).
+-- Las cuentas que ya existían se registran aquí mismo.
+-- =====================================================================
+create function fn_perfil_desde_auth() returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  insert into public.usuario (auth_id, email, nombre, id_rol)
+  values (new.id, coalesce(new.email, 'sin-correo'),
+          coalesce(nullif(trim(new.raw_user_meta_data ->> 'nombre'), ''), split_part(coalesce(new.email, 'usuario'), '@', 1)),
+          (select id_rol from public.rol where clave = case when exists (
+             select 1 from public.usuario u join public.rol_permiso rp on rp.id_rol = u.id_rol where u.activo and rp.permiso = 'usuarios.administrar')
+           then 'CONSULTA' else 'ADMIN' end))
+  on conflict (auth_id) do nothing;
+  return new;
+end $$;
+revoke execute on function fn_perfil_desde_auth() from public, anon, authenticated;
+
+do $$
+declare a record;
+begin
+  if to_regclass('auth.users') is null then
+    raise notice 'Supabase Auth no disponible: los perfiles se crearán al iniciar sesión.';
+    return;
+  end if;
+  execute 'drop trigger if exists lotesmart_perfil_nuevo on auth.users';
+  execute 'create trigger lotesmart_perfil_nuevo after insert on auth.users for each row execute function public.fn_perfil_desde_auth()';
+  for a in execute 'select id, email, raw_user_meta_data from auth.users order by created_at' loop
+    insert into usuario (auth_id, email, nombre, id_rol)
+    values (a.id, coalesce(a.email, 'sin-correo'),
+            coalesce(nullif(trim(a.raw_user_meta_data ->> 'nombre'), ''), split_part(coalesce(a.email, 'usuario'), '@', 1)),
+            (select id_rol from rol where clave = case when exists (
+               select 1 from usuario u join rol_permiso rp on rp.id_rol = u.id_rol where u.activo and rp.permiso = 'usuarios.administrar')
+             then 'CONSULTA' else 'ADMIN' end))
+    on conflict (auth_id) do nothing;
+  end loop;
 end $$;
 
 -- =====================================================================
