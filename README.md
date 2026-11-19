@@ -12,7 +12,8 @@ Inventario por lotes con caducidad y despacho FEFO. Es la versión web del docum
 | `sql/actualizacion_02_imagenes.sql` | Actualización sin borrar datos: fotos de productos (columna, función y bucket de Storage). |
 | `sql/actualizacion_03_roles.sql` | Actualización sin borrar datos: roles de usuario y permisos. |
 | `sql/actualizacion_04_tablero.sql` | Actualización sin borrar datos: el tablero solo lo ve el Administrador. |
-| `tests/pruebas.sql` | 49 pruebas automáticas de reglas, seguridad, roles y reportes (opcional). |
+| `sql/actualizacion_05_alta_usuarios.sql` | Actualización sin borrar datos: solo los administradores dan de alta usuarios. |
+| `tests/pruebas.sql` | 57 pruebas automáticas de reglas, seguridad, roles y reportes (opcional). |
 
 ## Instalación (5 minutos)
 
@@ -22,7 +23,7 @@ Inventario por lotes con caducidad y despacho FEFO. Es la versión web del docum
 3. En **Project Settings → API** copia la **Project URL** y la clave **anon public**.
 4. Crea los usuarios (elige una opción):
    - **Desde Supabase:** Authentication → Users → **Add user → Create new user**, con correo y contraseña y marcando *Auto Confirm User*.
-   - **Desde la app:** pestaña **Crear cuenta**. Por defecto Supabase manda un correo de confirmación; para la demo del hackathon puedes desactivarlo en Authentication → Sign In / Providers → Email → *Confirm email*.
+   - **Los demás usuarios** los da de alta el administrador desde la app (**Usuarios y permisos → Nuevo usuario**). Si en Supabase está activo *Confirm email*, la persona recibe un correo para confirmar antes de entrar; para la demo puedes desactivarlo en Authentication → Sign In / Providers → Email.
    - Si publicas la app en internet, pon su dirección en Authentication → URL Configuration → *Site URL*, para que los enlaces de confirmación y de "olvidé mi contraseña" regresen a ella.
 5. Abre `index.html` en el navegador (doble clic), pega la URL y la clave, pulsa **Conectar** e inicia sesión.
 
@@ -44,7 +45,7 @@ Además: tablero de caducidad (valor en riesgo, no vendible, semáforo, alerta d
 Cada producto puede llevar una foto (JPG, PNG o WebP). La app la reduce sola a 800 px antes de subirla a Supabase Storage (bucket público `productos`, máximo 2 MB). Se ve en el catálogo, en el detalle del producto y en el carrito de ventas. Solo usuarios con sesión pueden subir o quitar fotos.
 
 ### Roles de usuario
-Cada cuenta tiene un rol. La primera cuenta de la instalación queda como **Administrador**; las demás entran como **Consulta** hasta que un administrador les asigna otro rol en **Usuarios y permisos**.
+Solo los administradores dan de alta usuarios: en **Usuarios y permisos → Nuevo usuario** escriben nombre, correo, rol y una contraseña temporal, y la app muestra los datos para compartirlos. La pantalla de inicio ya no tiene "Crear cuenta", y una cuenta que alguien registre por fuera no recibe acceso. La primera cuenta de una instalación nueva queda como **Administrador**.
 
 | Permiso | Administrador | Almacén | Vendedor | Consulta |
 |---|:-:|:-:|:-:|:-:|
@@ -111,4 +112,4 @@ El tablero ejecuta `marcar_caducados()` cada vez que se abre. Si quieres que cor
 
 ## Pruebas
 
-En el SQL Editor, después de instalar, ejecuta `tests/pruebas.sql`. Debe terminar con **49 de 49 aprobadas**. Al final vuelve a ejecutar el script principal para dejar los datos de prueba limpios.
+En el SQL Editor, después de instalar, ejecuta `tests/pruebas.sql`. Debe terminar con **57 de 57 aprobadas**. Al final vuelve a ejecutar el script principal para dejar los datos de prueba limpios.

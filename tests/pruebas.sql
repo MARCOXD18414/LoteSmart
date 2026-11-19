@@ -1,7 +1,7 @@
 -- =====================================================================
 --  LoteSmart · Pruebas de integración (sección 13 del documento)
 --  Ejecútalo en Supabase → SQL Editor DESPUÉS de lotesmart_supabase.sql.
---  Resultado esperado: "49 de 49 aprobadas".
+--  Resultado esperado: "57 de 57 aprobadas".
 --  Modifica datos: al terminar vuelve a ejecutar lotesmart_supabase.sql.
 -- =====================================================================
 drop table if exists pg_temp.r;
@@ -22,7 +22,7 @@ create or replace function pg_temp.espera(p_prueba text, p_cond boolean, p_det t
 $$ insert into r (prueba, ok, detalle) values (p_prueba, coalesce(p_cond, false), p_det) $$;
 
 do $$
-declare v_antes bigint; v_sim jsonb; v_v2 bigint; v_leche int; v_para int; v_yog int;
+declare v_antes bigint; v_sim jsonb; v_v2 bigint; v_nuevo int; v_leche int; v_para int; v_yog int;
   c_ana  text := '{"sub":"aaaaaaaa-0000-0000-0000-000000000001","email":"ana@lotesmart.mx"}';
   c_vero text := '{"sub":"aaaaaaaa-0000-0000-0000-000000000002","email":"vero@lotesmart.mx"}';
   c_caro text := '{"sub":"aaaaaaaa-0000-0000-0000-000000000003","email":"caro@lotesmart.mx"}';
@@ -37,7 +37,7 @@ begin
   reset role;
 
   -- Perfiles de prueba: Administradora, Vendedora y Consulta.
-  delete from usuario where auth_id::text like 'aaaaaaaa-0000-0000-0000-%';
+  delete from usuario where auth_id::text like 'aaaaaaaa-0000-0000-0000-%' or email in ('nuevo@lotesmart.mx', 'temporal@lotesmart.mx');
   insert into usuario (auth_id, email, nombre, id_rol) values
     ('aaaaaaaa-0000-0000-0000-000000000001', 'ana@lotesmart.mx',  'Ana López',      (select id_rol from rol where clave = 'ADMIN')),
     ('aaaaaaaa-0000-0000-0000-000000000002', 'vero@lotesmart.mx', 'Vero Vendedora', (select id_rol from rol where clave = 'VENDEDOR')),
@@ -172,6 +172,26 @@ begin
   perform set_config('request.jwt.claims', c_caro, true);
   perform pg_temp.espera('Usuario desactivado no ve datos', (select count(*) from v_producto) = 0, 'ok');
   perform pg_temp.espera_error('Usuario desactivado no opera', $q$select marcar_caducados()$q$);
+
+  -- Alta de usuarios: solo administradores
+  perform set_config('request.jwt.claims', c_vero, true);
+  perform pg_temp.espera_error('Vendedor no da de alta usuarios', $q$select usuario_crear('otro@lotesmart.mx', 'Otro', 1, 'x')$q$);
+  perform set_config('request.jwt.claims', c_ana, true);
+  v_nuevo := usuario_crear('Nuevo@LoteSmart.mx', 'Nuevo Vendedor', (select id_rol from rol where clave = 'VENDEDOR'), 'x');
+  perform pg_temp.espera('Administrador da de alta un usuario (pendiente)',
+    (select auth_id is null and email = 'nuevo@lotesmart.mx' from usuario where id_usuario = v_nuevo), 'ok');
+  perform pg_temp.espera_error('No se repite el correo', $q$select usuario_crear('nuevo@lotesmart.mx', 'Otra vez', 1, 'x')$q$);
+  v_nuevo := usuario_crear('temporal@lotesmart.mx', 'Temporal', 1, 'x');
+  perform usuario_eliminar(v_nuevo, 'x');
+  perform pg_temp.espera('Eliminar un alta pendiente', not exists (select 1 from usuario where email = 'temporal@lotesmart.mx'), 'ok');
+  perform set_config('request.jwt.claims', '{"sub":"aaaaaaaa-0000-0000-0000-000000000009","email":"intruso@gmail.com"}', true);
+  perform pg_temp.espera_error('Cuenta sin alta no entra', $q$select mi_perfil()$q$);
+  perform pg_temp.espera('Cuenta sin alta no ve datos', (select count(*) from v_producto) = 0, 'ok');
+  perform set_config('request.jwt.claims', '{"sub":"aaaaaaaa-0000-0000-0000-000000000008","email":"nuevo@lotesmart.mx"}', true);
+  perform pg_temp.espera('Usuario dado de alta entra con su rol', (mi_perfil() ->> 'rol') = 'VENDEDOR', 'ok');
+  perform set_config('request.jwt.claims', c_ana, true);
+  perform pg_temp.espera_error('No se elimina un usuario con cuenta',
+    format($q$select usuario_eliminar(%s, 'x')$q$, (select id_usuario from usuario where email = 'nuevo@lotesmart.mx')));
 end $$;
 
 select n, case when ok then 'APROBADA' else 'FALLÓ' end as estado, prueba, left(detalle, 120) as detalle

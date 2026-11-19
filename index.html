@@ -507,10 +507,11 @@ const auth = {
     return data;
   },
   async entrar(email, password) { this.guardar(await this.llamar('token?grant_type=password', { email, password })); },
-  async registrar(email, password, nombre) {
+  // Crea la cuenta de otra persona (lo usa el administrador). No cambia la sesión actual.
+  async crearCuenta(email, password, nombre) {
     const d = await this.llamar('signup', { email, password, data: { nombre } });
-    if (d.access_token) { this.guardar(d); return true; }
-    return false;   // Supabase pide confirmar el correo
+    const u = d.user || d;
+    return { lista: !!(d.access_token || (u && (u.email_confirmed_at || u.confirmed_at))), confirmar: !d.access_token };
   },
   async recuperar(email) { await this.llamar('recover', { email }); },
   async renovar() {
@@ -529,7 +530,11 @@ if (auth.session) cfg.usuario = auth.nombre;
 class SesionExpirada extends ApiError {}
 const puede = (p) => !!(auth.perfil && auth.perfil.activo && (auth.perfil.permisos || []).includes(p));
 async function cargarPerfil() {
-  auth.perfil = await db.rpc('mi_perfil');
+  try { auth.perfil = await db.rpc('mi_perfil'); }
+  catch (e) {
+    if (/no está autorizada|desactivado/i.test(e.message)) { await auth.salir(); throw new SesionExpirada(e.message); }
+    throw e;
+  }
   if (!auth.perfil.activo) {
     await auth.salir();
     throw new SesionExpirada('Tu usuario está desactivado. Habla con un administrador de LoteSmart.');
@@ -1872,8 +1877,8 @@ window.addEventListener('scroll', () => { tip.hidden = true; }, { passive: true 
 async function paginaUsuarios() {
   view.innerHTML = `<div class="page-head"><div><h1>Usuarios y permisos</h1>
       <p>Asigna el rol de cada persona y decide qué puede hacer cada rol. Los cambios aplican en la siguiente acción del usuario.</p></div></div>
-    <div class="notice">Para agregar a alguien: que cree su cuenta en la pantalla de inicio (<b>Crear cuenta</b>) o créala en Supabase → Authentication → Users. Entra con rol <b>Consulta</b> y aquí le asignas el que le corresponda.</div>
-    <div class="card"><div class="card-head"><h2>Usuarios</h2><span class="muted" id="cuentaU"></span></div>
+    <div class="card"><div class="card-head"><h2>Usuarios</h2><div class="toolbar"><span class="muted" id="cuentaU"></span>
+      <button class="btn primary" type="button" id="btnNuevoU">${icon('plus')}Nuevo usuario</button></div></div>
       <div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Correo</th><th>Rol</th><th>Estado</th><th class="hide-sm">Alta</th><th class="num">Acciones</th></tr></thead><tbody id="rowsU">${loadingRow(6)}</tbody></table></div></div>
     <div class="card"><div class="card-head"><h2>Permisos por rol</h2><span class="muted">Marca o desmarca: se guarda al momento</span></div>
       <div class="table-wrap"><table class="matriz"><thead id="headM"></thead><tbody id="rowsM">${loadingRow(5)}</tbody></table></div></div>`;
@@ -1892,9 +1897,9 @@ async function paginaUsuarios() {
       <td><div class="prod-cell"><span class="avatar" style="width:28px;height:28px;font-size:.7rem">${esc(iniciales(u.nombre))}</span><b>${esc(u.nombre)}</b>${u.email === (auth.user && auth.user.email) ? ' <span class="tag" style="background:var(--accent-soft);color:var(--accent-strong)">Tú</span>' : ''}</div></td>
       <td class="mono nw">${esc(u.email)}</td>
       <td><select class="input" data-rol style="min-width:150px" aria-label="Rol de ${esc(u.nombre)}">${roles.map((r) => `<option value="${r.id_rol}"${r.id_rol === u.id_rol ? ' selected' : ''}>${esc(r.nombre)}</option>`).join('')}</select></td>
-      <td>${pill(u.activo ? 'ACTIVO' : 'BAJA', u.activo ? 'Activo' : 'Desactivado')}</td>
+      <td>${!u.auth_id ? pill('AMARILLO', 'Pendiente') : pill(u.activo ? 'ACTIVO' : 'BAJA', u.activo ? 'Activo' : 'Desactivado')}</td>
       <td class="hide-sm nw">${fecha(u.creado_en)}</td>
-      <td><div class="row-actions">${btn('nombre', 'Editar nombre', 'edit')}${u.activo ? btn('desactivar', 'Desactivar', 'ban', 'danger') : btn('activar', 'Activar', 'restore')}</div></td></tr>`).join('');
+      <td><div class="row-actions">${btn('nombre', 'Editar nombre', 'edit')}${!u.auth_id ? btn('eliminarU', 'Eliminar alta', 'trash', 'danger') : u.activo ? btn('desactivar', 'Desactivar', 'ban', 'danger') : btn('activar', 'Activar', 'restore')}</div></td></tr>`).join('');
     $('#headM').innerHTML = `<tr><th>Permiso</th>${roles.map((r) => `<th class="center" title="${esc(r.descripcion || '')}">${esc(r.nombre)}</th>`).join('')}</tr>`;
     $('#rowsM').innerHTML = permisos.map((p) => `<tr><td>${esc(p.descripcion)}</td>${roles.map((r) => {
       const fijo = r.clave === 'ADMIN' && p.clave === 'usuarios.administrar';
@@ -1927,6 +1932,58 @@ async function paginaUsuarios() {
       guardar(u, { activo: false }, `${u.nombre} desactivado.`);
     }
     if (a.dataset.action === 'activar') guardar(u, { activo: true }, `${u.nombre} activado.`);
+    if (a.dataset.action === 'eliminarU') {
+      if (!await confirmar({ title: 'Eliminar alta pendiente', message: `Se borrará el alta de <b>${esc(u.nombre)}</b> (${esc(u.email)}). Todavía no había entrado nunca a LoteSmart.`, okLabel: 'Eliminar', danger: true })) return;
+      try { await db.rpc('usuario_eliminar', conUsuario({ p_id_usuario: u.id_usuario })); toast('Alta eliminada.'); } catch (err) { fallo(err); }
+      cargar();
+    }
+  });
+  // Alta de usuarios: el administrador elige correo, nombre, rol y una contraseña temporal.
+  $('#btnNuevoU').addEventListener('click', () => {
+    const temporal = 'Lote-' + Math.random().toString(36).slice(2, 6) + Math.floor(100 + Math.random() * 900);
+    formModal({ title: 'Nuevo usuario', okLabel: 'Dar de alta',
+      notice: 'La persona entrará con este correo y la contraseña temporal. Después puede cambiarla en <b>Mi cuenta</b>.',
+      fields: [
+        { name: 'nombre', label: 'Nombre completo (así firmará)', required: true, minLen: 3, max: 80, full: true, placeholder: 'Luis Pérez' },
+        { name: 'email', label: 'Correo', type: 'email', required: true, max: 160, full: true, pattern: /^[^@\s]+@[^@\s]+\.[^@\s]+$/, patternMsg: 'Escribe un correo válido.' },
+        { name: 'id_rol', label: 'Rol', type: 'select', required: true, options: async () => roles.map((r) => [r.id_rol, r.nombre + (r.descripcion ? ' · ' + r.descripcion : '')]) },
+        { name: 'password', label: 'Contraseña temporal', required: true, minLen: 6, max: 72, mono: true, value: temporal, help: 'Mínimo 6 caracteres. Cópiala para dársela a la persona.' }
+      ],
+      values: { id_rol: (roles.find((r) => r.clave === 'VENDEDOR') || roles[0] || {}).id_rol },
+      onSubmit: async (d) => {
+        const email = d.email.toLowerCase();
+        await db.rpc('usuario_crear', conUsuario({ p_email: email, p_nombre: d.nombre, p_id_rol: Number(d.id_rol) }));
+        let estado = 'lista', detalle = '';
+        try {
+          const r = await auth.crearCuenta(email, d.password, d.nombre);
+          if (!r.lista && r.confirmar) estado = 'confirmar';
+        } catch (err) {
+          if (/ya existe una cuenta/i.test(err.message)) estado = 'existia';
+          else if (/desactivado/i.test(err.message)) estado = 'sinregistro';
+          else { estado = 'error'; detalle = err.message; }
+        }
+        await cargar();
+        const rol = (roles.find((r) => String(r.id_rol) === String(d.id_rol)) || {}).nombre;
+        const msg = {
+          lista: `La cuenta está lista. Comparte estos datos con <b>${esc(d.nombre)}</b>:`,
+          confirmar: `Le enviamos un correo a <b>${esc(email)}</b> para confirmar la cuenta. Cuando la confirme, entra con:`,
+          existia: `Esa persona ya tenía cuenta en Supabase: quedó ligada con el rol ${esc(rol)}. Entra con su contraseña de siempre.`,
+          sinregistro: `El alta quedó guardada, pero en Supabase está desactivado el registro de cuentas. Crea la cuenta en <b>Authentication → Users → Add user</b> con el correo <b>${esc(email)}</b> y quedará ligada sola.`,
+          error: `El alta quedó guardada, pero no se pudo crear la cuenta (${esc(detalle)}). Puedes crearla en Supabase → Authentication → Users con el mismo correo.`
+        }[estado];
+        const datos = ['lista', 'confirmar'].includes(estado);
+        setTimeout(() => {
+          const ov = openModal({ title: 'Usuario dado de alta', size: 'sm',
+            body: `<p style="margin:0">${msg}</p>${datos ? `<dl class="facts" style="grid-template-columns:1fr"><div><dt>Correo</dt><dd class="mono">${esc(email)}</dd></div>
+              <div><dt>Contraseña temporal</dt><dd class="mono">${esc(d.password)}</dd></div><div><dt>Rol</dt><dd>${esc(rol)}</dd></div>
+              <div><dt>Dirección</dt><dd class="mono">${esc(location.origin + location.pathname)}</dd></div></dl>` : ''}`,
+            foot: `${datos ? `<button class="btn" type="button" id="copiarU">${icon('log')}Copiar datos</button>` : ''}<button class="btn primary" type="button" data-close>Listo</button>` });
+          if ($('#copiarU', ov)) $('#copiarU', ov).addEventListener('click', async () => {
+            const t = `LoteSmart\nDirección: ${location.origin + location.pathname}\nCorreo: ${email}\nContraseña temporal: ${d.password}\nRol: ${rol}`;
+            try { await navigator.clipboard.writeText(t); toast('Datos copiados.'); } catch { toast('Selecciona y copia los datos manualmente.', true); }
+          });
+        }, 50);
+      } });
   });
   $('#rowsM').addEventListener('change', async (e) => {
     const cb = e.target.closest('[data-rp]'); if (!cb) return;
@@ -1980,6 +2037,7 @@ function paginaConexion(mensaje = '') {
 }
 
 function paginaLogin(mensaje = '', modo = 'entrar') {
+  if (!['entrar', 'recuperar'].includes(modo)) modo = 'entrar';
   modoAuth(true);
   document.title = 'Iniciar sesión · LoteSmart';
   const correo = store.get('ultimoCorreo', '');
@@ -1994,10 +2052,6 @@ function paginaLogin(mensaje = '', modo = 'entrar') {
       </div>
     </section>
     <section class="login-form card">
-      <div class="seg login-tabs" role="tablist">
-        <button type="button" role="tab" data-modo="entrar" aria-pressed="${modo === 'entrar'}">Iniciar sesión</button>
-        <button type="button" role="tab" data-modo="crear" aria-pressed="${modo === 'crear'}">Crear cuenta</button>
-      </div>
       <div><h1>${modo === 'crear' ? 'Crea tu cuenta' : modo === 'recuperar' ? 'Recupera tu contraseña' : 'Bienvenido de nuevo'}</h1>
         <p class="muted" style="margin:6px 0 0">${modo === 'crear' ? 'Tu nombre firmará cada venta, merma y cambio que registres.' : modo === 'recuperar' ? 'Te enviaremos un enlace para crear una contraseña nueva.' : 'Entra con tu correo y contraseña.'}</p></div>
       ${mensaje ? `<div class="notice ${/revisa|enviamos|cerraste/i.test(mensaje) ? '' : 'bad'}">${esc(mensaje)}</div>` : ''}
@@ -2012,6 +2066,7 @@ function paginaLogin(mensaje = '', modo = 'entrar') {
       </form>
       <div class="login-links">
         ${modo === 'entrar' ? '<button type="button" class="link" data-modo="recuperar">¿Olvidaste tu contraseña?</button>' : '<button type="button" class="link" data-modo="entrar">Volver a iniciar sesión</button>'}
+        ${modo === 'entrar' ? '<span class="muted" style="font-size:.84rem">¿No tienes cuenta? Pide a un administrador que te dé de alta.</span>' : ''}
         ${CONFIG.url ? '' : '<button type="button" class="link" id="lConn">Cambiar conexión</button>'}
       </div>
     </section></div>`;
@@ -2032,10 +2087,7 @@ function paginaLogin(mensaje = '', modo = 'entrar') {
     try {
       store.set('ultimoCorreo', email);
       if (modo === 'entrar') { await auth.entrar(email, pass); entrarApp(); }
-      else if (modo === 'crear') {
-        if (await auth.registrar(email, pass, nombre)) { toast('Cuenta creada. ¡Bienvenido!'); entrarApp(); }
-        else paginaLogin(`Te enviamos un correo a ${email}. Revisa tu bandeja, confirma la cuenta y luego inicia sesión.`, 'entrar');
-      } else { await auth.recuperar(email); paginaLogin(`Si existe una cuenta con ${email}, te enviamos un enlace para cambiar la contraseña. Revisa tu correo.`, 'entrar'); }
+      else { await auth.recuperar(email); paginaLogin(`Si existe una cuenta con ${email}, te enviamos un enlace para cambiar la contraseña. Revisa tu correo.`, 'entrar'); }
     } catch (err) { paginaLogin(err.message, modo); if ($('#lEmail')) $('#lEmail').value = email; }
   });
 }

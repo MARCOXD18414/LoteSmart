@@ -42,7 +42,7 @@ drop function if exists
   rpt_ventas, rpt_ventas_dia, rpt_ventas_producto, rpt_ventas_cliente, rpt_inventario,
   rpt_por_caducar, rpt_mermas_ajustes, rpt_entradas_proveedor, rpt_kardex,
   fn_uid, fn_activo, fn_tiene_permiso, fn_exigir, mi_perfil, mi_nombre, usuario_actualizar, rol_permiso_cambiar,
-  fn_perfil_desde_auth cascade;
+  fn_perfil_desde_auth, usuario_crear, usuario_eliminar cascade;
 
 -- =====================================================================
 -- 1. TIPOS Y UTILIDADES
@@ -247,10 +247,11 @@ create table rol_permiso (
   primary key (id_rol, permiso)
 );
 
--- Perfil de cada cuenta de Supabase Auth dentro de LoteSmart.
+-- Perfil de cada persona dentro de LoteSmart. Lo crea un administrador;
+-- auth_id queda vacío hasta que la persona tiene su cuenta de Supabase Auth.
 create table usuario (
   id_usuario int generated always as identity primary key,
-  auth_id    uuid         not null,
+  auth_id    uuid,                     -- null = dado de alta, cuenta pendiente
   email      varchar(160) not null,
   nombre     varchar(80)  not null,
   id_rol     smallint     not null references rol(id_rol) on delete restrict,
@@ -260,6 +261,7 @@ create table usuario (
   constraint ck_usuario_nombre check (char_length(trim(nombre)) >= 2)
 );
 create index ix_usuario_rol on usuario (id_rol);
+create unique index uq_usuario_email on usuario (lower(email));
 
 insert into rol (clave, nombre, descripcion) values
   ('ADMIN',    'Administrador', 'Todo, incluida la administración de usuarios y permisos.'),
@@ -317,7 +319,7 @@ begin
   end if;
   select u.activo, r.nombre into v_activo, v_rol from usuario u join rol r on r.id_rol = u.id_rol where u.auth_id = fn_uid();
   if not found then
-    raise exception 'Tu cuenta aún no tiene perfil en LoteSmart. Cierra sesión y vuelve a entrar.' using errcode = 'P0001';
+    raise exception 'Tu cuenta no está autorizada en LoteSmart. Pide a un administrador que te dé de alta.' using errcode = 'P0001';
   end if;
   if not v_activo then
     raise exception 'Tu usuario está desactivado. Habla con un administrador.' using errcode = 'P0001';
@@ -1146,27 +1148,67 @@ $$;
 -- 7b. USUARIOS Y PERMISOS
 -- =====================================================================
 
--- Perfil del usuario con sesión. Si es su primera vez, lo crea: el primer
--- usuario de la instalación queda como Administrador; los demás como Consulta.
+-- Perfil del usuario con sesión. Solo entra quien fue dado de alta por un
+-- administrador (se liga por correo la primera vez). Excepción: si la
+-- instalación todavía no tiene administrador, la primera cuenta lo será.
 create function mi_perfil() returns jsonb language plpgsql security definer set search_path = public as $$
 declare c jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb; v usuario%rowtype; r rol%rowtype;
 begin
   if fn_uid() is null then raise exception 'Inicia sesión para continuar.' using errcode = 'P0001'; end if;
   select * into v from usuario where auth_id = fn_uid();
   if not found then
-    insert into usuario (auth_id, email, nombre, id_rol)
-    values (fn_uid(), coalesce(c ->> 'email', 'sin-correo'),
-            coalesce(nullif(trim(c -> 'user_metadata' ->> 'nombre'), ''), split_part(coalesce(c ->> 'email', 'usuario'), '@', 1)),
-            (select id_rol from rol where clave = case when exists (
-               select 1 from usuario u join rol_permiso rp on rp.id_rol = u.id_rol where u.activo and rp.permiso = 'usuarios.administrar')
-             then 'CONSULTA' else 'ADMIN' end))
-    on conflict (auth_id) do nothing;
-    select * into v from usuario where auth_id = fn_uid();
+    -- ¿Un administrador lo dio de alta con este correo?
+    update usuario set auth_id = fn_uid()
+     where auth_id is null and lower(email) = lower(coalesce(c ->> 'email', ''))
+    returning * into v;
+    if v.id_usuario is null then
+      if exists (select 1 from usuario u join rol_permiso rp on rp.id_rol = u.id_rol
+                  where u.activo and rp.permiso = 'usuarios.administrar') then
+        raise exception 'Tu cuenta no está autorizada en LoteSmart. Pide a un administrador que te dé de alta.' using errcode = 'P0001';
+      end if;
+      insert into usuario (auth_id, email, nombre, id_rol)
+      values (fn_uid(), coalesce(c ->> 'email', 'sin-correo'),
+              coalesce(nullif(trim(c -> 'user_metadata' ->> 'nombre'), ''), split_part(coalesce(c ->> 'email', 'usuario'), '@', 1)),
+              (select id_rol from rol where clave = 'ADMIN'))
+      returning * into v;
+    end if;
   end if;
   select * into r from rol where id_rol = v.id_rol;
   return jsonb_build_object('id_usuario', v.id_usuario, 'nombre', v.nombre, 'email', v.email, 'activo', v.activo,
     'rol', r.clave, 'rol_nombre', r.nombre,
     'permisos', (select coalesce(jsonb_agg(permiso order by permiso), '[]'::jsonb) from rol_permiso where id_rol = v.id_rol));
+end $$;
+
+-- Alta de un usuario (solo administradores). Si la persona ya tiene cuenta
+-- en Supabase Auth con ese correo, queda ligada de inmediato.
+create function usuario_crear(p_email text, p_nombre text, p_id_rol int, p_usuario text default null)
+returns int language plpgsql security definer set search_path = public as $$
+declare v_id int; v_auth uuid; v_email text := lower(trim(p_email));
+begin
+  perform fn_set_usuario(p_usuario); perform fn_exigir('usuarios.administrar');
+  if v_email !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' then
+    raise exception 'El correo no tiene un formato válido.' using errcode = 'P0001';
+  end if;
+  if exists (select 1 from usuario where lower(email) = v_email) then
+    raise exception 'Ya existe un usuario con el correo %.', v_email using errcode = 'P0001';
+  end if;
+  if to_regclass('auth.users') is not null then
+    execute 'select id from auth.users where lower(email) = $1 limit 1' into v_auth using v_email;
+  end if;
+  insert into usuario (auth_id, email, nombre, id_rol) values (v_auth, v_email, trim(p_nombre), p_id_rol)
+  returning id_usuario into v_id;
+  return v_id;
+end $$;
+
+-- Elimina un alta que todavía no se activó (para usuarios activos, desactivar).
+create function usuario_eliminar(p_id_usuario int, p_usuario text default null)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  perform fn_set_usuario(p_usuario); perform fn_exigir('usuarios.administrar');
+  delete from usuario where id_usuario = p_id_usuario and auth_id is null;
+  if not found then
+    raise exception 'Solo se pueden eliminar altas pendientes. A un usuario con cuenta, desactívalo.' using errcode = 'P0001';
+  end if;
 end $$;
 
 -- Cada quien puede cambiar su propio nombre de firma.
@@ -1285,7 +1327,8 @@ begin
     'rpt_ventas_cliente(date, date)', 'rpt_inventario()', 'rpt_por_caducar(int)',
     'rpt_mermas_ajustes(date, date)', 'rpt_entradas_proveedor(date, date)', 'rpt_kardex(date, date, int)',
     'fn_uid()', 'fn_activo()', 'fn_tiene_permiso(text)', 'fn_exigir(text)',
-    'mi_perfil()', 'mi_nombre(text)', 'usuario_actualizar(int, text, int, boolean, text)', 'rol_permiso_cambiar(int, text, boolean, text)'
+    'mi_perfil()', 'mi_nombre(text)', 'usuario_actualizar(int, text, int, boolean, text)', 'rol_permiso_cambiar(int, text, boolean, text)',
+    'usuario_crear(text, text, int, text)', 'usuario_eliminar(int, text)'
   ] loop
     execute format('revoke execute on function %s from public, anon', f);
     execute format('grant execute on function %s to authenticated', f);
@@ -1318,19 +1361,22 @@ begin
 end $$;
 
 -- =====================================================================
--- Perfiles automáticos: cada cuenta nueva de Supabase Auth recibe su perfil
--- (rol Consulta; la primera cuenta de la instalación queda como Administrador).
--- Las cuentas que ya existían se registran aquí mismo.
+-- Al crearse una cuenta en Supabase Auth se liga con el alta que hizo el
+-- administrador (mismo correo). Una cuenta sin alta NO recibe acceso.
+-- Las cuentas que ya existían al instalar se registran aquí mismo.
 -- =====================================================================
 create function fn_perfil_desde_auth() returns trigger language plpgsql security definer set search_path = public as $$
 begin
-  insert into public.usuario (auth_id, email, nombre, id_rol)
-  values (new.id, coalesce(new.email, 'sin-correo'),
-          coalesce(nullif(trim(new.raw_user_meta_data ->> 'nombre'), ''), split_part(coalesce(new.email, 'usuario'), '@', 1)),
-          (select id_rol from public.rol where clave = case when exists (
-             select 1 from public.usuario u join public.rol_permiso rp on rp.id_rol = u.id_rol where u.activo and rp.permiso = 'usuarios.administrar')
-           then 'CONSULTA' else 'ADMIN' end))
-  on conflict (auth_id) do nothing;
+  update public.usuario set auth_id = new.id where auth_id is null and lower(email) = lower(coalesce(new.email, ''));
+  if not found and not exists (select 1 from public.usuario u join public.rol_permiso rp on rp.id_rol = u.id_rol
+                                where u.activo and rp.permiso = 'usuarios.administrar') then
+    -- Instalación nueva sin administrador: la primera cuenta lo será.
+    insert into public.usuario (auth_id, email, nombre, id_rol)
+    values (new.id, coalesce(new.email, 'sin-correo'),
+            coalesce(nullif(trim(new.raw_user_meta_data ->> 'nombre'), ''), split_part(coalesce(new.email, 'usuario'), '@', 1)),
+            (select id_rol from public.rol where clave = 'ADMIN'))
+    on conflict do nothing;
+  end if;
   return new;
 end $$;
 revoke execute on function fn_perfil_desde_auth() from public, anon, authenticated;
@@ -1351,7 +1397,7 @@ begin
             (select id_rol from rol where clave = case when exists (
                select 1 from usuario u join rol_permiso rp on rp.id_rol = u.id_rol where u.activo and rp.permiso = 'usuarios.administrar')
              then 'CONSULTA' else 'ADMIN' end))
-    on conflict (auth_id) do nothing;
+    on conflict do nothing;
   end loop;
 end $$;
 
