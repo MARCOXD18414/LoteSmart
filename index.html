@@ -965,6 +965,7 @@ async function paginaCatalogo(key) {
     $('#rows').innerHTML = datos.length ? datos.map((r) => `<tr class="click${r.activo ? '' : ' off'}" data-id="${r[C.pk]}">
         ${C.cols.map(([, fn, cls]) => `<td class="${cls || ''}">${fn(r)}</td>`).join('')}
         <td><div class="row-actions">
+          ${C.vista === 'v_producto' && r.activo && puede('lotes.editar') ? btn('recibir', 'Recibir', 'plus', r.alerta_reorden || !r.stock_vigente ? 'primary' : '', 'title="Registrar mercancía nueva de este producto"') : ''}
           ${puede(C.perm) ? btn('editar', 'Editar', 'edit') + (r.activo ? btn('baja', 'Baja', 'archive') : btn('reactivar', 'Reactivar', 'restore')) : ''}
           ${puede('registros.eliminar') ? btn('eliminar', 'Eliminar', 'trash', 'danger') : ''}
           ${!puede(C.perm) && !puede('registros.eliminar') ? btn('ver', 'Ver', 'search') : ''}
@@ -1001,6 +1002,7 @@ async function accionCatalogo(C, accion, r, recargar) {
   try {
     if (accion === 'ver') return verCatalogo(C, r, recargar);
     if (accion === 'editar') return altaOEdicion(C, r, recargar);
+    if (accion === 'recibir') { closeModal(); return altaLote(recargar, r.id_producto); }
     if (accion === 'baja') {
       if (!await confirmar({ title: `Dar de baja ${C.singular}`, message: `<b>${esc(nom)}</b>. ${C.bajaTxt} Puedes reactivarlo cuando quieras.`, okLabel: 'Dar de baja' })) return;
       await db.rpc(C.rpcBaja, conUsuario({ p_id: r[C.pk] })); toast(`${nom} dado de baja.`);
@@ -1091,14 +1093,37 @@ const camposLote = (l = {}) => {
   ];
 };
 
-async function altaLote(recargar) {
-  await formModal({
-    title: 'Entrada de mercancía (alta de lote)', fields: camposLote(), okLabel: 'Registrar lote',
+// Última entrada de un producto: para no volver a capturar proveedor y costo al reabastecer.
+async function ultimaEntrada(idProducto) {
+  if (!idProducto) return null;
+  const [l] = await db.list('v_lote_detalle', { select: 'id_proveedor,costo_unitario,codigo_lote,fecha_entrada', where: [['id_producto', 'eq', idProducto]], order: 'fecha_entrada.desc,id_lote.desc', limit: 1 });
+  return l || null;
+}
+async function altaLote(recargar, idProducto = null) {
+  const previa = await ultimaEntrada(idProducto).catch(() => null);
+  const valores = idProducto ? { id_producto: idProducto, ...(previa ? { id_proveedor: previa.id_proveedor, costo_unitario: previa.costo_unitario } : {}) } : {};
+  const aviso = (u) => u ? `Proveedor y costo tomados de la última entrada (lote <b class="mono">${esc(u.codigo_lote)}</b>, ${fecha(u.fecha_entrada)}). Solo escribe el código del lote nuevo, su caducidad y la cantidad que llegó.` : '';
+  const ov = await formModal({
+    title: idProducto ? 'Reabastecer producto' : 'Entrada de mercancía (alta de lote)', fields: camposLote(), values: valores, okLabel: 'Registrar lote',
+    notice: aviso(previa) || ' ',
     onSubmit: async (d) => {
       await db.rpc('lote_alta', conUsuario({ p_id_producto: Number(d.id_producto), p_id_proveedor: Number(d.id_proveedor), p_codigo_lote: d.codigo_lote,
         p_fecha_caducidad: d.fecha_caducidad, p_cantidad: d.cantidad_inicial, p_costo_unitario: d.costo_unitario }));
-      toast(`Lote ${d.codigo_lote} registrado.`); recargar();
+      toast(`Lote ${d.codigo_lote} registrado. El stock ya incluye las ${int(d.cantidad_inicial)} unidades.`); recargar();
     }
+  });
+  // Al elegir el producto se llenan solos el proveedor y el costo de su última entrada.
+  const nota = $('.notice', ov);
+  nota.classList.remove('warn');
+  if (!previa) nota.hidden = true;
+  if (idProducto) setTimeout(() => { const c = $('#f_codigo_lote', ov); if (c && !ov.contains(document.activeElement) || document.activeElement === $('#f_id_producto', ov)) c.focus(); }, 40);
+  $('#f_id_producto', ov).addEventListener('change', async (e) => {
+    const u = await ultimaEntrada(e.target.value).catch(() => null);
+    if (!u) { nota.hidden = true; return; }
+    const prov = $('#f_id_proveedor', ov), costo = $('#f_costo_unitario', ov);
+    if ([...prov.options].some((o) => o.value === String(u.id_proveedor))) prov.value = String(u.id_proveedor);
+    costo.value = u.costo_unitario;
+    nota.innerHTML = aviso(u); nota.hidden = false;
   });
 }
 async function editarLote(l, recargar) {
@@ -1140,6 +1165,7 @@ async function accionLote(accion, l, recargar) {
     if (accion === 'ver') return verLote(l.id_lote, recargar);
     if (accion === 'editar') return editarLote(l, recargar);
     if (accion === 'merma') return mermaLote(l, recargar);
+    if (accion === 'reabastecer') { closeModal(); return altaLote(recargar, l.id_producto); }
     if (accion === 'ajuste') return ajusteLote(l, recargar);
     if (accion === 'bloquear') {
       const m = await confirmar({ title: `Bloquear lote ${l.codigo_lote}`, message: 'Un lote bloqueado no se vende hasta que lo desbloquees. Útil para retiros sanitarios o revisión de calidad.', okLabel: 'Bloquear lote', reason: 'Motivo del bloqueo' });
@@ -1193,11 +1219,11 @@ async function verLote(id, recargar) {
     foot.className = 'modal-foot';
     foot.innerHTML = `${puede('registros.eliminar') ? btn('eliminar', 'Eliminar', 'trash', 'danger', l.tiene_movimientos ? 'disabled title="Tiene movimientos"' : '') : ''}<span class="spacer"></span>
       ${puede('inventario.ajustar') ? btn('merma', 'Merma', 'drop', '', l.cantidad_disponible > 0 ? '' : 'disabled') + btn('ajuste', 'Ajuste', 'scale') : ''}
-      ${puede('lotes.editar') ? (l.estado === 'BLOQUEADO' ? btn('desbloquear', 'Desbloquear', 'unlock') : btn('bloquear', 'Bloquear', 'lock')) + btn('editar', 'Editar', 'edit', 'primary') : ''}`;
+      ${puede('lotes.editar') ? (l.estado === 'BLOQUEADO' ? btn('desbloquear', 'Desbloquear', 'unlock') : btn('bloquear', 'Bloquear', 'lock')) + btn('reabastecer', 'Reabastecer', 'plus') + btn('editar', 'Editar', 'edit', 'primary') : ''}`;
     if (puede('registros.eliminar') || puede('inventario.ajustar') || puede('lotes.editar')) $('.modal', ov).append(foot);
     foot.addEventListener('click', (e) => {
       const a = e.target.closest('[data-action]'); if (!a) return;
-      if (['editar', 'merma', 'ajuste'].includes(a.dataset.action)) closeModal(ov);
+      if (['editar', 'merma', 'ajuste', 'reabastecer'].includes(a.dataset.action)) closeModal(ov);
       accionLote(a.dataset.action, l, recargar);
     });
   } catch (e) { $('.modal-body', ov).innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
@@ -1238,7 +1264,7 @@ async function paginaLotes() {
       <td>${lotLabel(l.codigo_lote, l.fecha_caducidad)}</td><td>${esc(l.producto)}</td><td class="hide-sm">${esc(l.proveedor)}</td>
       <td class="num">${int(l.cantidad_disponible)} <span class="muted">/ ${int(l.cantidad_inicial)}</span></td><td class="num">${dias(l.dias_restantes)}</td>
       <td>${pill(l.semaforo)}</td><td class="num hide-sm">${money(l.valor_existencia)}</td>
-      <td><div class="row-actions">${puede('lotes.editar') ? btn('editar', 'Editar', 'edit') : ''}${puede('inventario.ajustar') ? btn('merma', 'Merma', 'drop', '', l.cantidad_disponible > 0 ? '' : 'disabled') : ''}
+      <td><div class="row-actions">${puede('lotes.editar') && l.cantidad_disponible === 0 ? btn('reabastecer', 'Reabastecer', 'plus', 'primary') : ''}${puede('lotes.editar') ? btn('editar', 'Editar', 'edit') : ''}${puede('inventario.ajustar') && l.cantidad_disponible > 0 ? btn('merma', 'Merma', 'drop') : ''}
         ${puede('lotes.editar') ? (l.estado === 'BLOQUEADO' ? btn('desbloquear', 'Desbloquear', 'unlock') : btn('bloquear', 'Bloquear', 'lock')) : ''}
         ${puede('registros.eliminar') ? btn('eliminar', 'Eliminar', 'trash', 'danger', l.tiene_movimientos ? 'disabled title="Tiene movimientos: no se puede eliminar"' : '') : ''}
         ${!puede('lotes.editar') && !puede('inventario.ajustar') ? btn('ver', 'Ver', 'search') : ''}</div></td></tr>`).join('')
